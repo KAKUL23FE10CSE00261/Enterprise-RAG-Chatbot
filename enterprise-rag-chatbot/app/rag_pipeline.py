@@ -4,10 +4,12 @@ Core RAG pipeline: context building, streaming generation, hallucination guard.
 """
 
 import os
-from openai import OpenAI
+from groq import Groq
 from retrieval.retriever import retrieve
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+client = Groq(
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
 SYSTEM_PROMPT = """You are a helpful, precise enterprise assistant.
 
@@ -43,7 +45,7 @@ def is_grounded(answer: str, chunks: list[dict]) -> bool:
     """Secondary LLM call: verify every claim in the answer is in the context."""
     context = build_context(chunks)
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="llama3-8b-8192",
         messages=[{
             "role": "user",
             "content": (

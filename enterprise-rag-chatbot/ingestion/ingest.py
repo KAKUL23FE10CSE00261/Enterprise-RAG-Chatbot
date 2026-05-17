@@ -55,9 +55,8 @@ def chunk_text(text, source, doc_type="general"):
 
 def get_collection():
     client = chromadb.PersistentClient(path=CHROMA_PATH)
-    ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.environ["OPENAI_API_KEY"],
-        model_name=EMBED_MODEL,
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name="all-MiniLM-L6-v2"
     )
     return client.get_or_create_collection(
         name=COLLECTION_NAME,

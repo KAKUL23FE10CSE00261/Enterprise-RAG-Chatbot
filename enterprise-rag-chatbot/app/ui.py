@@ -19,8 +19,8 @@ from pathlib import Path
 import streamlit as st
 
 # ── API key check (must come before any other imports that need it) ─────────────
-if not os.environ.get("OPENAI_API_KEY"):
-    st.error("OPENAI_API_KEY not set. Run:  set OPENAI_API_KEY=sk-...")
+if not os.environ.get("GROQ_API_KEY"):
+    st.error("GROQ_API_KEY not set.")
     st.stop()
 
 from ingestion.ingest import ingest_file, list_ingested_files

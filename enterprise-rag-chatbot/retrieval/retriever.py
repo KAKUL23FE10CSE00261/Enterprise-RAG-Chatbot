@@ -6,7 +6,6 @@ fused with Reciprocal Rank Fusion, then reranked with Cohere v2.
 
 import os
 import math
-from openai import OpenAI
 import chromadb
 from chromadb.utils import embedding_functions
 from rank_bm25 import BM25Okapi
@@ -14,19 +13,17 @@ from rank_bm25 import BM25Okapi
 # ── Config ────────────────────────────────────────────────────────────────────
 CHROMA_PATH    = "chroma_db"
 COLLECTION_NAME = "enterprise_docs"
-EMBED_MODEL    = "text-embedding-3-small"
+EMBED_MODEL = "all-MiniLM-L6-v2"
 TOP_K          = 12      # candidates for fusion
 RERANK_TOP_N   = 5       # final chunks fed to LLM
-
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────────
 
 def get_collection():
     client = chromadb.PersistentClient(path=CHROMA_PATH)
-    ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.environ["OPENAI_API_KEY"],
-        model_name=EMBED_MODEL,
+
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
     )
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
@@ -36,16 +33,7 @@ def get_collection():
 # ── HyDE query rewriting ──────────────────────────────────────────────────────
 
 def hyde_rewrite(query: str) -> str:
-    """Generate a hypothetical answer paragraph to improve embedding alignment."""
-    resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Write a short, factual paragraph that directly answers the following question. Be concise."},
-            {"role": "user",   "content": query},
-        ],
-        max_tokens=200,
-    )
-    return resp.choices[0].message.content.strip()
+    return query
 
 # ── Vector search ─────────────────────────────────────────────────────────────
 
