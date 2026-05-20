@@ -1,25 +1,27 @@
 """
 retrieval/retriever.py
-Hybrid retrieval: dense vector (SentenceTransformer) + BM25 + RRF + Cohere reranker.
-HyDE rewriting uses Groq (free).
+Hybrid retrieval: dense vector search (ChromaDB) + BM25 keyword search,
+fused with Reciprocal Rank Fusion, then reranked with Cohere v2.
 """
 
 import os
+import math
 import chromadb
 from chromadb.utils import embedding_functions
 from rank_bm25 import BM25Okapi
-from groq import Groq
 
-CHROMA_PATH     = "chroma_db"
+# ── Config ────────────────────────────────────────────────────────────────────
+CHROMA_PATH    = "chroma_db"
 COLLECTION_NAME = "enterprise_docs"
-TOP_K           = 12
-RERANK_TOP_N    = 5
+EMBED_MODEL = "all-MiniLM-L6-v2"
+TOP_K          = 12      # candidates for fusion
+RERANK_TOP_N   = 5       # final chunks fed to LLM
 
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-
+# ── ChromaDB ──────────────────────────────────────────────────────────────────
 
 def get_collection():
     client = chromadb.PersistentClient(path=CHROMA_PATH)
+
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="all-MiniLM-L6-v2"
     )
@@ -28,107 +30,133 @@ def get_collection():
         embedding_function=ef,
     )
 
+# ── HyDE query rewriting ──────────────────────────────────────────────────────
 
-def hyde_rewrite(query):
-    """Generate a hypothetical answer using Groq to improve retrieval."""
-    try:
-        resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Write a short factual paragraph answering this question:"},
-                {"role": "user",   "content": query},
-            ],
-            max_tokens=150,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception:
-        return query  # fallback to original query
+def hyde_rewrite(query: str) -> str:
+    return query
 
+# ── Vector search ─────────────────────────────────────────────────────────────
 
-def _collection_count(col):
-    try:
-        return max(col.count(), 1)
-    except Exception:
-        return TOP_K
-
-
-def vector_search(query, top_k=TOP_K, doc_type_filter=None):
+def vector_search(query: str, top_k: int = TOP_K,
+                  doc_type_filter: str | None = None) -> list[dict]:
+    """Dense semantic search with optional metadata filter."""
     collection = get_collection()
-    count = _collection_count(collection)
-    if count == 0:
-        return []
-    where  = {"doc_type": doc_type_filter} if doc_type_filter else None
-    kwargs = dict(query_texts=[query], n_results=min(top_k, count))
+    where = {"doc_type": doc_type_filter} if doc_type_filter else None
+    kwargs = dict(query_texts=[query], n_results=min(top_k, _collection_count(collection)))
     if where:
         kwargs["where"] = where
     results = collection.query(**kwargs)
     return [
-        {"text": doc, "source": meta.get("source", ""),
+        {"text": doc, "source": meta.get("source", "unknown"),
          "filename": meta.get("filename", "unknown"),
          "doc_type": meta.get("doc_type", "general")}
         for doc, meta in zip(results["documents"][0], results["metadatas"][0])
     ]
 
+def _collection_count(col) -> int:
+    try:
+        return col.count()
+    except Exception:
+        return TOP_K
 
-def bm25_search(query, top_k=TOP_K, doc_type_filter=None):
+# ── BM25 keyword search ───────────────────────────────────────────────────────
+
+def bm25_search(query: str, top_k: int = TOP_K,
+                doc_type_filter: str | None = None) -> list[dict]:
+    """Sparse keyword search over all stored chunks."""
     collection = get_collection()
-    where  = {"doc_type": doc_type_filter} if doc_type_filter else None
+    where = {"doc_type": doc_type_filter} if doc_type_filter else None
     kwargs = dict(include=["documents", "metadatas"])
     if where:
         kwargs["where"] = where
+
     data  = collection.get(**kwargs)
     docs  = data["documents"]
     metas = data["metadatas"]
+
     if not docs:
         return []
+
     tokenised = [d.lower().split() for d in docs]
     bm25      = BM25Okapi(tokenised)
     scores    = bm25.get_scores(query.lower().split())
-    ranked    = sorted(zip(scores, docs, metas), key=lambda x: x[0], reverse=True)[:top_k]
+
+    ranked = sorted(
+        zip(scores, docs, metas), key=lambda x: x[0], reverse=True
+    )[:top_k]
+
     return [
-        {"text": doc, "source": meta.get("source", ""),
+        {"text": doc, "source": meta.get("source", "unknown"),
          "filename": meta.get("filename", "unknown"),
          "doc_type": meta.get("doc_type", "general")}
         for _, doc, meta in ranked
     ]
 
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
 
-def reciprocal_rank_fusion(vector_results, bm25_results, k=60):
-    scores, chunks = {}, {}
+def reciprocal_rank_fusion(
+    vector_results: list[dict],
+    bm25_results:   list[dict],
+    k: int = 60,
+) -> list[dict]:
+    """Merge two ranked lists using RRF. Higher score = more relevant."""
+    scores: dict[str, float] = {}
+    chunks: dict[str, dict]  = {}
+
     for rank, chunk in enumerate(vector_results):
-        key = chunk["text"][:120]
+        key = chunk["text"][:120]   # dedup key
         scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
         chunks[key] = chunk
+
     for rank, chunk in enumerate(bm25_results):
         key = chunk["text"][:120]
         scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
         chunks[key] = chunk
-    return [chunks[k] for k in sorted(scores, key=scores.__getitem__, reverse=True)]
 
+    sorted_keys = sorted(scores, key=scores.__getitem__, reverse=True)
+    return [chunks[k] for k in sorted_keys]
 
-def rerank(query, chunks, top_n=RERANK_TOP_N):
-    key = os.environ.get("COHERE_API_KEY")
-    if not key or not chunks:
+# ── Cohere reranker (v2 API) ──────────────────────────────────────────────────
+
+def rerank(query: str, chunks: list[dict], top_n: int = RERANK_TOP_N) -> list[dict]:
+    """Rerank with Cohere v2 API if key available, else return top-n by RRF."""
+    cohere_key = os.environ.get("COHERE_API_KEY")
+    if not cohere_key or not chunks:
         return chunks[:top_n]
     try:
         import cohere
-        co       = cohere.ClientV2(api_key=key)
-        response = co.rerank(model="rerank-english-v3.0", query=query,
-                             documents=[c["text"] for c in chunks], top_n=top_n)
+        co = cohere.ClientV2(api_key=cohere_key)          # v2 client
+        response = co.rerank(
+            model="rerank-english-v3.0",
+            query=query,
+            documents=[c["text"] for c in chunks],
+            top_n=top_n,
+        )
         return [chunks[r.index] for r in response.results]
     except Exception as e:
-        print(f"[reranker] Cohere error: {e}")
+        print(f"[reranker] Cohere error ({e}), falling back to RRF order.")
         return chunks[:top_n]
 
+# ── Public API ────────────────────────────────────────────────────────────────
 
-def retrieve(query, use_hyde=True, use_hybrid=True, doc_type_filter=None):
+def retrieve(
+    query: str,
+    use_hyde: bool = True,
+    use_hybrid: bool = True,
+    doc_type_filter: str | None = None,
+) -> tuple[list[dict], str]:
+    """
+    Main retrieval entry point.
+    Returns (chunks, search_query_used).
+    """
     search_query = hyde_rewrite(query) if use_hyde else query
 
     if use_hybrid:
-        vec   = vector_search(search_query, TOP_K, doc_type_filter)
-        bm25  = bm25_search(query, TOP_K, doc_type_filter)
+        vec   = vector_search(search_query, top_k=TOP_K, doc_type_filter=doc_type_filter)
+        bm25  = bm25_search(query, top_k=TOP_K, doc_type_filter=doc_type_filter)
         fused = reciprocal_rank_fusion(vec, bm25)
     else:
-        fused = vector_search(search_query, TOP_K, doc_type_filter)
+        fused = vector_search(search_query, top_k=TOP_K, doc_type_filter=doc_type_filter)
 
-    return rerank(query, fused, RERANK_TOP_N), search_query
+    reranked = rerank(query, fused, top_n=RERANK_TOP_N)
+    return reranked, search_query

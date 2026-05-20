@@ -1,27 +1,33 @@
 """
-app/ui.py — Enterprise RAG Chatbot
-Uses Groq API (free). Embeddings via local SentenceTransformer.
+app/ui.py  —  Enterprise RAG Chatbot  (Streamlit)
+
+Features:
+  • Streaming responses (token-by-token)
+  • Hybrid search toggle (vector + BM25)
+  • HyDE query rewriting toggle
+  • Hallucination guard toggle
+  • Document-type metadata filter
+  • Thumbs-up / thumbs-down feedback with comment
+  • Debug panel (rewritten query, chunks used, grounding)
+  • Ingested files list in sidebar
 """
 
 import os
 import tempfile
 from pathlib import Path
+
 import streamlit as st
 
-# ── API key check ─────────────────────────────────────────────────────────────
+# ── API key check (must come before any other imports that need it) ─────────────
 if not os.environ.get("GROQ_API_KEY"):
-    st.error(
-        "**GROQ_API_KEY not set.**\n\n"
-        "1. Get a free key at https://console.groq.com\n"
-        "2. In terminal run:\n```\nset GROQ_API_KEY=gsk_your-key-here\n```\n"
-        "3. Restart: `streamlit run app\\ui.py`"
-    )
+    st.error("GROQ_API_KEY not set.")
     st.stop()
 
 from ingestion.ingest import ingest_file, list_ingested_files
 from app.rag_pipeline import stream_answer
 from app.feedback import log_feedback, feedback_summary
 
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Enterprise RAG Chatbot",
     page_icon="📄",
@@ -29,6 +35,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
   .source-badge {
@@ -40,26 +47,21 @@ st.markdown("""
     background: #3d2600; border-left: 3px solid #ff9900;
     padding: 8px 12px; border-radius: 4px; font-size: 0.85rem;
   }
+  .feedback-row { display: flex; gap: 8px; margin-top: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📄 Enterprise RAG Chatbot")
-st.caption("Upload documents · Ask questions · Get cited, grounded answers  |  Powered by Groq + Llama 3")
+st.caption("Upload documents · Ask questions · Get cited, grounded answers")
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for key, default in [("messages", []), ("history", []), ("model_ready", False)]:
+for key, default in [
+    ("messages", []),
+    ("history",  []),
+    ("pending_feedback_idx", None),
+]:
     if key not in st.session_state:
         st.session_state[key] = default
-
-# ── Pre-warm embedding model (avoids blank screen on first upload) ────────────
-if not st.session_state.model_ready:
-    with st.spinner("⏳ Loading embedding model for the first time (~30 sec)…"):
-        try:
-            from ingestion.ingest import get_collection
-            get_collection()
-        except Exception:
-            pass
-        st.session_state.model_ready = True
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -72,32 +74,26 @@ with st.sidebar:
     )
 
     doc_type = st.selectbox(
-        "Document type",
+        "Document type (for filtering)",
         ["general", "hr", "legal", "research", "finance", "technical"],
     )
 
     if uploaded_files:
         if st.button("⚡ Ingest documents", type="primary", use_container_width=True):
             progress = st.progress(0, text="Starting…")
-            status   = st.empty()
             for i, uf in enumerate(uploaded_files):
                 progress.progress((i + 1) / len(uploaded_files), text=f"Processing {uf.name}…")
-                status.info(f"Embedding {uf.name}… please wait")
                 suffix = Path(uf.name).suffix
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(uf.read())
                     tmp_path = tmp.name
-                try:
-                    n = ingest_file(tmp_path, doc_type=doc_type)
-                    status.success(f"✅ {uf.name} — {n} chunks stored")
-                except Exception as e:
-                    status.error(f"❌ {uf.name}: {e}")
-                finally:
-                    os.unlink(tmp_path)
+                ingest_file(tmp_path, doc_type=doc_type)
+                os.unlink(tmp_path)
             progress.empty()
-            st.success(f"Done! Ingested {len(uploaded_files)} file(s)")
+            st.success(f"✓ Ingested {len(uploaded_files)} file(s) as [{doc_type}]")
             st.rerun()
 
+    # Ingested files list
     ingested = list_ingested_files()
     if ingested:
         with st.expander(f"📂 Ingested files ({len(ingested)})", expanded=False):
@@ -108,13 +104,19 @@ with st.sidebar:
 
     st.divider()
     st.header("⚙️ Settings")
-    use_hybrid      = st.toggle("Hybrid search (vector + BM25)", value=True)
-    use_hyde        = st.toggle("HyDE query rewriting",          value=True)
-    check_grounding = st.toggle("Hallucination guard",           value=True)
+
+    use_hybrid      = st.toggle("Hybrid search (vector + BM25)", value=True,
+                                help="Combines dense and keyword search for better recall")
+    use_hyde        = st.toggle("HyDE query rewriting",          value=True,
+                                help="Generates a hypothetical answer to improve embedding alignment")
+    check_grounding = st.toggle("Hallucination guard",           value=True,
+                                help="Secondary LLM call verifies every claim is grounded")
     show_debug      = st.toggle("Debug panel",                   value=False)
 
-    doc_filter    = st.selectbox("Filter by doc type",
-                                  ["All"] + ["general","hr","legal","research","finance","technical"])
+    doc_filter = st.selectbox(
+        "Filter by doc type (optional)",
+        ["All"] + ["general", "hr", "legal", "research", "finance", "technical"],
+    )
     active_filter = None if doc_filter == "All" else doc_filter
 
     st.divider()
@@ -135,25 +137,47 @@ with st.sidebar:
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+
         if msg["role"] == "assistant":
+            # Source badges
             if msg.get("sources"):
-                badges = "".join(f'<span class="source-badge">📎 {s}</span>' for s in msg["sources"])
+                badges = "".join(
+                    f'<span class="source-badge">📎 {s}</span>'
+                    for s in msg["sources"]
+                )
                 st.markdown(badges, unsafe_allow_html=True)
+
+            # Hallucination warning
             if msg.get("warning"):
-                st.markdown(f'<div class="warning-box">⚠️ {msg["warning"]}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="warning-box">⚠️ {msg["warning"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Debug panel
             if show_debug and msg.get("debug"):
                 with st.expander("🔍 Debug"):
                     st.json(msg["debug"])
+
+            # Feedback buttons (only for messages not yet rated)
             if not msg.get("rated"):
                 col1, col2, _ = st.columns([1, 1, 8])
                 if col1.button("👍", key=f"up_{idx}"):
-                    log_feedback(query=msg.get("query",""), answer=msg["content"],
-                                 sources=msg.get("sources",[]), rating="up")
+                    log_feedback(
+                        query=msg.get("query", ""),
+                        answer=msg["content"],
+                        sources=msg.get("sources", []),
+                        rating="up",
+                    )
                     st.session_state.messages[idx]["rated"] = True
                     st.rerun()
                 if col2.button("👎", key=f"down_{idx}"):
-                    log_feedback(query=msg.get("query",""), answer=msg["content"],
-                                 sources=msg.get("sources",[]), rating="down")
+                    log_feedback(
+                        query=msg.get("query", ""),
+                        answer=msg["content"],
+                        sources=msg.get("sources", []),
+                        rating="down",
+                    )
                     st.session_state.messages[idx]["rated"] = True
                     st.rerun()
 
@@ -161,10 +185,12 @@ for idx, msg in enumerate(st.session_state.messages):
 query = st.chat_input("Ask a question about your documents…")
 
 if query:
+    # Append user message
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
+    # Stream assistant response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_text   = ""
@@ -190,12 +216,17 @@ if query:
         warning  = None
 
         if sources:
-            badges = "".join(f'<span class="source-badge">📎 {s}</span>' for s in sources)
+            badges = "".join(
+                f'<span class="source-badge">📎 {s}</span>' for s in sources
+            )
             st.markdown(badges, unsafe_allow_html=True)
 
         if not grounded:
             warning = "Answer may not be fully supported by the uploaded documents."
-            st.markdown(f'<div class="warning-box">⚠️ {warning}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="warning-box">⚠️ {warning}</div>',
+                unsafe_allow_html=True,
+            )
 
         if show_debug:
             with st.expander("🔍 Debug"):
@@ -203,17 +234,27 @@ if query:
                     "rewritten_query": metadata.get("rewritten_query"),
                     "chunks_used":     metadata.get("chunks_used"),
                     "grounded":        grounded,
-                    "hybrid":          use_hybrid,
+                    "hybrid_search":   use_hybrid,
                     "hyde":            use_hyde,
+                    "doc_filter":      active_filter,
                 })
 
+    # Save to session state
     st.session_state.messages.append({
-        "role": "assistant", "content": full_text,
-        "sources": sources, "warning": warning,
-        "query": query, "rated": False,
-        "debug": {"rewritten_query": metadata.get("rewritten_query"),
-                  "chunks_used": metadata.get("chunks_used"), "grounded": grounded},
+        "role":    "assistant",
+        "content": full_text,
+        "sources": sources,
+        "warning": warning,
+        "query":   query,
+        "rated":   False,
+        "debug": {
+            "rewritten_query": metadata.get("rewritten_query"),
+            "chunks_used":     metadata.get("chunks_used"),
+            "grounded":        grounded,
+        },
     })
+
+    # Update conversation history for multi-turn context
     st.session_state.history.extend([
         {"role": "user",      "content": query},
         {"role": "assistant", "content": full_text},

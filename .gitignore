@@ -1,0 +1,20 @@
+# Chroma database
+chroma_db/
+*.sqlite3
+*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Feedback/runtime files
+feedback/*.jsonl
+
+# Temporary files
+tempCodeRunnerFile.py
+
+# Environment files
+.env
+
+# Jupyter
+.ipynb_checkpoints/

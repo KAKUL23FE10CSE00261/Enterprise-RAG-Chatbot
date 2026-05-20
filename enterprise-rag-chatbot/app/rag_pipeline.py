@@ -1,14 +1,15 @@
 """
 app/rag_pipeline.py
-Uses Groq API (free, fast) with llama3-70b for generation.
-Embeddings use local SentenceTransformer — no OpenAI key needed.
+Core RAG pipeline: context building, streaming generation, hallucination guard.
 """
 
 import os
 from groq import Groq
 from retrieval.retriever import retrieve
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+client = Groq(
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
 SYSTEM_PROMPT = """You are a helpful, precise enterprise assistant.
 
@@ -20,7 +21,9 @@ Rules:
 4. Be concise and structured. Use bullet points for lists."""
 
 
-def build_context(chunks):
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def build_context(chunks: list[dict]) -> str:
     parts = []
     for i, chunk in enumerate(chunks):
         fn = chunk.get("filename") or chunk["source"].replace("\\", "/").split("/")[-1]
@@ -28,7 +31,7 @@ def build_context(chunks):
     return "\n\n---\n\n".join(parts)
 
 
-def extract_sources(chunks):
+def extract_sources(chunks: list[dict]) -> list[str]:
     seen, sources = set(), []
     for c in chunks:
         fn = c.get("filename") or c["source"].replace("\\", "/").split("/")[-1]
@@ -38,27 +41,38 @@ def extract_sources(chunks):
     return sources
 
 
-def is_grounded(answer, chunks):
+def is_grounded(answer: str, chunks: list[dict]) -> bool:
+    """Secondary LLM call: verify every claim in the answer is in the context."""
     context = build_context(chunks)
     resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content":
-            f"Context:\n{context}\n\nAnswer:\n{answer}\n\n"
-            "Is every factual claim in the Answer supported by the Context? "
-            "Reply YES or NO only."}],
+        model="llama3-8b-8192",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Context:\n{context}\n\n"
+                f"Answer:\n{answer}\n\n"
+                "Is every factual claim in the Answer supported by the Context? "
+                "Reply YES or NO only."
+            ),
+        }],
         max_tokens=5,
     )
     return resp.choices[0].message.content.strip().upper().startswith("YES")
 
 
-def stream_answer(
-    query,
-    history=None,
-    use_hyde=True,
-    use_hybrid=True,
-    doc_type_filter=None,
-):
-    """Streaming generator. Yields text tokens, then a final metadata dict."""
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+def generate_answer(
+    query: str,
+    history: list[dict] | None = None,
+    use_hyde: bool = True,
+    use_hybrid: bool = True,
+    check_grounding: bool = True,
+    doc_type_filter: str | None = None,
+) -> dict:
+    """
+    Non-streaming generation. Returns a result dict.
+    """
     chunks, rewritten_query = retrieve(
         query,
         use_hyde=use_hyde,
@@ -67,7 +81,64 @@ def stream_answer(
     )
 
     if not chunks:
-        yield "No relevant documents found. Please upload and ingest documents first."
+        return {
+            "answer":          "No relevant documents found. Please upload documents first.",
+            "sources":         [],
+            "grounded":        False,
+            "chunks_used":     0,
+            "rewritten_query": rewritten_query,
+        }
+
+    context  = build_context(chunks)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history[-6:])
+    messages.append({
+        "role":    "user",
+        "content": f"Context:\n{context}\n\nQuestion: {query}",
+    })
+
+    resp   = client.chat.completions.create(
+        model="gpt-4o", messages=messages, temperature=0.2, max_tokens=700
+    )
+    answer  = resp.choices[0].message.content.strip()
+    sources = extract_sources(chunks)
+    grounded = is_grounded(answer, chunks) if check_grounding else True
+
+    return {
+        "answer":          answer,
+        "sources":         sources,
+        "grounded":        grounded,
+        "chunks_used":     len(chunks),
+        "rewritten_query": rewritten_query,
+    }
+
+
+def stream_answer(
+    query: str,
+    history: list[dict] | None = None,
+    use_hyde: bool = True,
+    use_hybrid: bool = True,
+    doc_type_filter: str | None = None,
+):
+    """
+    Streaming generator. Yields text tokens, then a final metadata dict.
+    Usage:
+        for token in stream_answer(query):
+            if isinstance(token, dict):   # final metadata
+                sources = token["sources"]
+            else:
+                print(token, end="")
+    """
+    chunks, rewritten_query = retrieve(
+        query,
+        use_hyde=use_hyde,
+        use_hybrid=use_hybrid,
+        doc_type_filter=doc_type_filter,
+    )
+
+    if not chunks:
+        yield "No relevant documents found. Please upload documents first."
         yield {"sources": [], "grounded": False,
                "chunks_used": 0, "rewritten_query": rewritten_query}
         return
@@ -83,17 +154,15 @@ def stream_answer(
 
     full_answer = ""
     stream = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        temperature=0.2,
-        max_tokens=700,
-        stream=True,
+        model="gpt-4o", messages=messages,
+        temperature=0.2, max_tokens=700, stream=True,
     )
     for chunk in stream:
         delta = chunk.choices[0].delta.content or ""
         full_answer += delta
         yield delta
 
+    # After streaming finishes, emit metadata
     sources  = extract_sources(chunks)
     grounded = is_grounded(full_answer, chunks)
     yield {
