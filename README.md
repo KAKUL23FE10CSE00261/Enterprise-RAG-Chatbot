@@ -152,4 +152,4 @@ enterprise-rag-chatbot/
 - [ ] JWT authentication
 - [ ] Multi-modal RAG (tables + images via GPT-4V)
 - [ ] HuggingFace Spaces deployment
-- [ ] Fine-tuning pipeline from feedback JSONL
+- [ ] Fine-tuning pipeline from feedback JSONL 
