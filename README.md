@@ -1,155 +1,241 @@
-# 📄 Enterprise RAG Chatbot
+# 🚀 Enterprise RAG Chatbot
 
-> Upload PDFs, Word docs, or internal wikis — ask questions in natural language — get **cited, grounded answers** with zero hallucination from stale training data.
+An advanced Retrieval-Augmented Generation (RAG) chatbot built with Streamlit, Hybrid Retrieval, ChromaDB, and LLMs to provide accurate, context-aware, and grounded responses from uploaded documents.
 
----
-
-## ✨ Features 
-
-| Feature | Detail |
-|---|---|
-| **Hybrid search** | Dense vector (ChromaDB) + BM25 keyword search fused with Reciprocal Rank Fusion |
-| **HyDE rewriting** | Hypothetical Document Embeddings for better query-embedding alignment |
-| **Cohere Reranker** | Cross-encoder reranking of top candidates for precision |
-| **Hallucination guard** | Secondary LLM call verifies every claim is grounded in context |
-| **Streaming responses** | Token-by-token output like ChatGPT |
-| **Source citations** | Every answer cites the exact document(s) it came from |
-| **Metadata filtering** | Filter retrieval by document type (HR, Legal, Research…) |
-| **Feedback loop** | 👍 / 👎 ratings logged to JSONL for future fine-tuning |
-| **RAGAS evaluation** | Automated faithfulness, relevancy, precision, recall scoring |
-| **Docker ready** | One command to run anywhere |
+Users can upload PDFs and documents, ask questions in natural language, analyze previous year question papers, generate study plans, and receive intelligent responses with source-backed retrieval.
 
 ---
 
-## 🏗️ Architecture
+## ✨ Features
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Streamlit UI                         │
-│   Upload │ Chat │ Feedback │ Debug panel │ Settings     │
-└────────────────────────┬────────────────────────────────┘
-                         │ query
+### 📚 Intelligent Document Chat
+- Upload PDF, DOCX, TXT documents
+- Ask questions in natural language
+- Source-grounded responses
+- Streaming answers like ChatGPT
+
+### 🔍 Advanced Retrieval Pipeline
+- Hybrid Retrieval:
+  - Dense vector search (ChromaDB)
+  - BM25 keyword search
+- Reciprocal Rank Fusion (RRF)
+- HyDE query rewriting
+- Cohere reranking
+
+### 🛡️ Hallucination Guard
+- Secondary validation for response grounding
+- Reduces unsupported responses
+
+### 📊 PYQ Analyzer
+- Upload Previous Year Question papers
+- Analyze repeated topics
+- Identify important concepts
+- Generate topic insights
+
+### 📅 Smart Study Planner
+- Personalized study schedule generation
+- Helps organize preparation workflow
+
+### 👍 Feedback System
+- Like/dislike response system
+- Feedback logging for future improvement
+
+### 📱 WhatsApp Integration
+- WhatsApp bot support
+- Access chatbot outside the web interface
+
+### 🐳 Deployment Ready
+- Docker support
+- Streamlit deployment support
+
+---
+
+# 🏗️ System Architecture
+
+```text
+                    User Query
+                         │
                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                  RAG Pipeline                           │
-│                                                         │
-│  1. HyDE rewrite (GPT-4o-mini)                         │
-│     query → hypothetical answer paragraph               │
-│                                                         │
-│  2. Hybrid Retrieval                                    │
-│     ├── Vector search  (ChromaDB / text-embedding-3)   │
-│     └── BM25 keyword   (rank-bm25)                     │
-│              ↓ Reciprocal Rank Fusion                   │
-│                                                         │
-│  3. Cohere Reranker  (top-5 from top-12)               │
-│                                                         │
-│  4. GPT-4o generation  (streaming, last-6-turn memory) │
-│                                                         │
-│  5. Hallucination guard (GPT-4o-mini grounding check)  │
-└─────────────────────────────────────────────────────────┘
-                         ▲
-                         │ ingest
-┌─────────────────────────────────────────────────────────┐
-│                  Ingestion Pipeline                     │
-│  PDF (PyMuPDF) / DOCX (python-docx) / TXT              │
-│       ↓ RecursiveCharacterTextSplitter (512 / 50)      │
-│       ↓ text-embedding-3-small                         │
-│       ↓ ChromaDB upsert  + rich metadata               │
-└─────────────────────────────────────────────────────────┘
+                ┌────────────────┐
+                │ Streamlit UI   │
+                └────────┬───────┘
+                         │
+                         ▼
+               ┌──────────────────┐
+               │ HyDE Rewriting   │
+               └────────┬─────────┘
+                        │
+          ┌─────────────┴────────────┐
+          │                          │
+          ▼                          ▼
+ ┌─────────────────┐      ┌────────────────┐
+ │ Vector Search   │      │ BM25 Search    │
+ │ ChromaDB        │      │ Keyword Search │
+ └────────┬────────┘      └───────┬────────┘
+          │                       │
+          └──────────┬────────────┘
+                     ▼
+        ┌────────────────────────┐
+        │ Reciprocal Rank Fusion │
+        └──────────┬─────────────┘
+                   ▼
+        ┌────────────────────────┐
+        │ Cohere Reranking       │
+        └──────────┬─────────────┘
+                   ▼
+        ┌────────────────────────┐
+        │ LLM Response Generation│
+        └──────────┬─────────────┘
+                   ▼
+        ┌────────────────────────┐
+        │ Grounded Response      │
+        └────────────────────────┘
 ```
 
 ---
 
-## 📊 RAGAS Evaluation Results
-
-*(Run on ACME Corp HR Policy — sample document)*
-
-| Metric | Score | What it means |
-|---|---|---|
-| **Faithfulness** | 0.94 | Answers grounded in retrieved context |
-| **Answer Relevancy** | 0.91 | Answers actually address the question |
-| **Context Precision** | 0.88 | Retrieved chunks are truly relevant |
-| **Context Recall** | 0.86 | Retrieval captures all needed information |
-
-> Run your own: `python -m evaluation.evaluate`
-
----
-
-## 🚀 Quick Start
+# 📂 Project Structure
 
 ```bash
-# 1 — Clone and install
-git clone https://github.com/yourname/Enterprise-RAG-Chatbot.git
-cd Enterprise-RAG-Chatbot
-pip install -r requirements.txt
-
-# 2 — Set API keys
-set OPENAI_API_KEY=sk-...          # Windows
-export OPENAI_API_KEY=sk-...       # Mac/Linux
-# Optional: export COHERE_API_KEY=...
-
-# 3 — Run
-streamlit run app.py
-```
-
-**Or with Docker:**
-```bash
-docker build -t enterprise-rag .
-docker run -p 8501:8501 \
-  -e OPENAI_API_KEY=sk-... \
-  enterprise-rag
-```
-
-Then open http://localhost:8501
-
----
-
-## 🗂️ Project Structure
-
-```
-enterprise-rag-chatbot/
-├── app.py                        # Entry point: streamlit run app.py
-├── requirements.txt
-├── Dockerfile
+Enterprise-RAG-Chatbot/
+│
 ├── app/
-│   ├── ui.py                     # Streamlit UI (streaming, feedback, debug)
-│   ├── rag_pipeline.py           # Generation + hallucination guard
-│   └── feedback.py               # 👍/👎 logging + summary
+│   ├── ui.py
+│   ├── rag_pipeline.py
+│   ├── pyq_analyzer.py
+│   ├── study_planner.py
+│   └── feedback.py
+│
 ├── ingestion/
-│   └── ingest.py                 # Load → chunk → embed → ChromaDB
+│   └── ingest.py
+│
 ├── retrieval/
-│   └── retriever.py              # HyDE + hybrid search + Cohere rerank
+│   └── retriever.py
+│
 ├── evaluation/
-│   └── evaluate.py               # RAGAS eval script
+│
+├── whatsapp_bot/
+│
+├── feedback/
+│
+├── chroma_db/
+│
 ├── data/
-│   └── sample_docs/
-│       └── hr_policy.txt
-└── feedback/
-    └── feedback.jsonl            # Auto-created on first thumbs click
+│
+├── main.py
+├── setup.py
+├── Dockerfile
+└── README.md
 ```
 
 ---
 
-## ⚙️ Tech Stack
+# ⚙️ Tech Stack
 
-| Layer | Tool |
-|---|---|
+| Category | Technology |
+|------------|-------------|
 | Frontend | Streamlit |
-| LLM | GPT-4o (generation), GPT-4o-mini (HyDE + grounding) |
-| Embeddings | text-embedding-3-small |
-| Vector DB | ChromaDB (persistent) |
-| Keyword search | rank-bm25 |
-| Reranker | Cohere rerank-english-v3.0 |
-| Document parsing | PyMuPDF, python-docx |
+| LLM | Groq API |
+| Vector Database | ChromaDB |
+| Embeddings | Sentence Transformers |
+| Retrieval | BM25 |
+| Reranking | Cohere |
+| Document Parsing | PyMuPDF |
 | Evaluation | RAGAS |
 | Deployment | Docker |
 
 ---
 
-## 🔮 Roadmap
+# 🚀 Installation
 
-- [ ] Pinecone swap-in for production scale
-- [ ] JWT authentication
-- [ ] Multi-modal RAG (tables + images via GPT-4V)
-- [ ] HuggingFace Spaces deployment
-- [ ] Fine-tuning pipeline from feedback JSONL 
+Clone repository:
+
+```bash
+git clone https://github.com/KAKUL23FE10CSE00261/Enterprise-RAG-Chatbot.git
+
+cd Enterprise-RAG-Chatbot
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Set environment variables:
+
+Windows:
+
+```bash
+set GROQ_API_KEY=your_api_key
+
+set COHERE_API_KEY=your_api_key
+```
+
+Linux/Mac:
+
+```bash
+export GROQ_API_KEY=your_api_key
+
+export COHERE_API_KEY=your_api_key
+```
+
+Run application:
+
+```bash
+streamlit run main.py
+```
+
+---
+
+# 🐳 Docker Setup
+
+Build image:
+
+```bash
+docker build -t enterprise-rag .
+```
+
+Run container:
+
+```bash
+docker run -p 8501:8501 enterprise-rag
+```
+
+---
+
+# 📸 Application Modules
+
+### 💬 Chat Module
+- Ask questions from uploaded documents
+- Streaming responses
+- Citation support
+
+### 📊 PYQ Analyzer
+- Analyze previous year papers
+- Identify patterns and trends
+
+### 📅 Study Planner
+- Personalized preparation planning
+
+### 📱 WhatsApp Bot
+- Access chatbot through WhatsApp
+
+---
+
+# 🔮 Future Improvements
+
+- [ ] Multi-modal RAG
+- [ ] Authentication system
+- [ ] Redis caching
+- [ ] Cloud deployment
+- [ ] Pinecone integration
+- [ ] Analytics dashboard
+
+---
+
+# 👩‍💻 Author
+
+Kakul Barsiya
+
+AI/ML Enthusiast | Data Science Learner | Building real-world ML applications 🚀
