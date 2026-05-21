@@ -236,6 +236,6 @@ docker run -p 8501:8501 enterprise-rag
 
 # 👩‍💻 Author
 
-Kakul Barsiya
+Kakul Barsaiya
 
 AI/ML Enthusiast | Data Science Learner | Building real-world ML applications 🚀
