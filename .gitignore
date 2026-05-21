@@ -1,0 +1,28 @@
+# Chroma vector DB
+chroma_db/
+*.sqlite3
+*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Temporary files
+tempCodeRunnerFile.py
+
+# Feedback/runtime files
+feedback/*.jsonlchroma_db/ 
+*.sqlite3 
+*.bin 
