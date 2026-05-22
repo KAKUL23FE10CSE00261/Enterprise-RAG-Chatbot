@@ -1,3 +1,6 @@
 chroma_db/ 
 *.sqlite3 
 *.bin 
+chroma_db/ 
+*.sqlite3 
+*.bin 

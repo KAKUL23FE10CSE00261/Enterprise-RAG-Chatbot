@@ -1,6 +1,7 @@
 """
 app/ui.py — College Assistant RAG Chatbot
-Tabs: Chat | Study Planner | PYQ Analyzer | WhatsApp Setup
+Tabs: Chat | Study Planner | PYQ Analyzer
+(WhatsApp bot removed — run separately: python whatsapp_bot/bot.py)
 """
 import os, sys, tempfile
 from pathlib import Path
@@ -28,7 +29,6 @@ st.markdown("""
   padding:2px 8px;font-size:0.78rem;margin-right:4px;display:inline-block;}
 .warning-box{background:#3d2600;border-left:3px solid #ff9900;
   padding:8px 12px;border-radius:4px;font-size:0.85rem;}
-.metric-card{background:#1a1a2e;border-radius:8px;padding:16px;text-align:center;}
 </style>""", unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -129,10 +129,11 @@ with st.sidebar:
         st.session_state.messages=[]; st.session_state.history=[]
         st.session_state.plan_result=None; st.rerun()
 
-# ── MAIN TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "💬 Chat", "📅 Study Planner", "📊 PYQ Analyzer", "📱 WhatsApp Bot"
-])
+    st.divider()
+    st.caption("📱 WhatsApp bot: `python whatsapp_bot\\bot.py`")
+
+# ── MAIN TABS (3 only) ────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["💬 Chat", "📅 Study Planner", "📊 PYQ Analyzer"])
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 1 — CHAT
@@ -147,11 +148,10 @@ with tab1:
             if st.button("✕ Close"):
                 st.session_state.show_summary=None; st.rerun()
 
-    # Summarize button
     if ingested:
-        col1, col2 = st.columns([3,1])
+        col1, col2 = st.columns([4,1])
         with col2:
-            sel = st.selectbox("Summarize doc", ingested, key="sum_sel", label_visibility="collapsed")
+            sel = st.selectbox("", ingested, key="sum_sel", label_visibility="collapsed")
             if st.button("📝 Summarize", use_container_width=True):
                 with st.spinner(f"Summarizing {sel}…"):
                     txt = get_full_text(sel)
@@ -160,7 +160,6 @@ with tab1:
                         st.session_state.show_summary={"file":sel,"text":summary}
                         st.rerun()
 
-    # Chat messages
     for idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -236,11 +235,11 @@ with tab2:
     with plan_tab1:
         col1, col2 = st.columns(2)
         with col1:
-            subject     = st.text_input("Subject name", placeholder="e.g. DBMS, OS, CN")
-            exam_date   = st.date_input("Exam date", min_value=date.today())
-            hours_day   = st.slider("Study hours per day", 1, 12, 4)
+            subject   = st.text_input("Subject name", placeholder="e.g. DBMS, OS, CN")
+            exam_date = st.date_input("Exam date", min_value=date.today())
+            hours_day = st.slider("Study hours per day", 1, 12, 4)
         with col2:
-            difficulty  = st.selectbox("Your current level", ["beginner","medium","advanced"])
+            difficulty = st.selectbox("Your current level", ["beginner","medium","advanced"])
             st.markdown("#### 📌 Tips")
             st.info("Upload your syllabus PDF first for a more accurate plan!")
 
@@ -250,8 +249,7 @@ with tab2:
             else:
                 with st.spinner(f"Creating study plan for {subject}…"):
                     result = generate_study_plan(
-                        subject, exam_date.strftime("%Y-%m-%d"),
-                        hours_day, difficulty)
+                        subject, exam_date.strftime("%Y-%m-%d"), hours_day, difficulty)
                 st.session_state.plan_result = result
 
         if st.session_state.plan_result:
@@ -277,9 +275,9 @@ with tab2:
         for i in range(n_subjects):
             with cols[i % 3]:
                 st.markdown(f"**Subject {i+1}**")
-                sub  = st.text_input("Name",    key=f"ms_{i}", placeholder="DBMS")
-                edate= st.date_input("Exam",    key=f"md_{i}", min_value=date.today())
-                prio = st.selectbox("Priority", ["high","medium","low"], key=f"mp_{i}")
+                sub   = st.text_input("Name",    key=f"ms_{i}", placeholder="DBMS")
+                edate = st.date_input("Exam",    key=f"md_{i}", min_value=date.today())
+                prio  = st.selectbox("Priority", ["high","medium","low"], key=f"mp_{i}")
                 if sub:
                     subjects_info.append({"subject":sub,"exam_date":edate.strftime("%Y-%m-%d"),"priority":prio})
 
@@ -290,8 +288,8 @@ with tab2:
                 with st.spinner("Creating combined schedule…"):
                     plan = generate_multi_subject_plan(subjects_info)
                 st.markdown(plan)
-                st.download_button("📥 Download",data=plan,
-                    file_name="combined_study_plan.txt",mime="text/plain")
+                st.download_button("📥 Download", data=plan,
+                    file_name="combined_study_plan.txt", mime="text/plain")
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — PYQ ANALYZER
@@ -332,28 +330,21 @@ with tab3:
         for analysis in st.session_state.pyq_analyses:
             with st.expander(f"📄 {analysis['filename']}", expanded=True):
                 col1, col2 = st.columns([3,2])
-
                 with col1:
                     st.markdown(analysis["analysis"])
-
                 with col2:
-                    # Topic frequency bar chart
                     if analysis["chart_data"] and len(analysis["chart_data"]) > 1:
                         st.markdown("**📊 Topic Frequency**")
                         import pandas as pd
-                        df = pd.DataFrame(
-                            list(analysis["chart_data"].items()),
-                            columns=["Topic","Questions"])
+                        df = pd.DataFrame(list(analysis["chart_data"].items()),
+                                          columns=["Topic","Questions"])
                         df = df.sort_values("Questions", ascending=False).head(10)
                         st.bar_chart(df.set_index("Topic"))
-
-                    # Predictions
                     if analysis["predictions"]:
                         st.markdown("**🎯 Predicted Topics for Next Exam:**")
                         for j, pred in enumerate(analysis["predictions"], 1):
                             st.markdown(f"{j}. 🔥 {pred}")
 
-        # Multi-year comparison
         if len(st.session_state.pyq_analyses) >= 2:
             st.divider()
             st.markdown("### 📈 Multi-Year Comparison")
@@ -362,70 +353,6 @@ with tab3:
                     comparison = compare_pyqs(st.session_state.pyq_analyses)
                 st.markdown(comparison)
                 st.download_button("📥 Download Analysis",
-                    data=comparison, file_name=f"pyq_analysis_{pyq_subject}.txt",
+                    data=comparison,
+                    file_name=f"pyq_analysis_{pyq_subject}.txt",
                     mime="text/plain")
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 4 — WHATSAPP SETUP
-# ════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.markdown("### 📱 WhatsApp Bot Setup")
-    st.caption("Let students ask questions on WhatsApp — no need to open a browser!")
-
-    st.success("🤖 Your WhatsApp bot is ready to deploy! Follow the steps below.")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### Step 1 — Install dependencies")
-        st.code("pip install twilio flask", language="bash")
-
-        st.markdown("#### Step 2 — Get free Twilio account")
-        st.markdown("""
-1. Go to **[twilio.com](https://twilio.com)** → Sign up free
-2. Go to **Messaging → Try it out → Send a WhatsApp message**
-3. Note your **Account SID** and **Auth Token**
-""")
-
-        st.markdown("#### Step 3 — Set credentials")
-        st.code("""set TWILIO_ACCOUNT_SID=ACxxxxxx
-set TWILIO_AUTH_TOKEN=xxxxxx
-set GROQ_API_KEY=gsk_xxxxxx""", language="bash")
-
-    with col2:
-        st.markdown("#### Step 4 — Run the bot")
-        st.code("python whatsapp_bot/bot.py", language="bash")
-
-        st.markdown("#### Step 5 — Expose with ngrok (free)")
-        st.code("""# Install ngrok from ngrok.com
-ngrok http 5000""", language="bash")
-
-        st.markdown("#### Step 6 — Connect to Twilio")
-        st.markdown("""
-1. Copy the ngrok HTTPS URL (e.g. `https://abc123.ngrok.io`)
-2. In Twilio Console → Sandbox Settings
-3. Set **When a message comes in** to:
-   `https://abc123.ngrok.io/whatsapp`
-4. Save
-""")
-
-    st.divider()
-    st.markdown("#### 💬 Test commands students can use")
-
-    commands = {
-        "hello / hi": "Get welcome message",
-        "help": "See all commands",
-        "topics DBMS": "Get key topics for DBMS",
-        "exam OS": "Get OS exam info",
-        "tip": "Get a study tip",
-        "reset": "Clear chat history",
-        "Any question": "Get RAG answer from your documents",
-    }
-
-    col1, col2 = st.columns(2)
-    for i, (cmd, desc) in enumerate(commands.items()):
-        target = col1 if i % 2 == 0 else col2
-        target.markdown(f"**`{cmd}`** — {desc}")
-
-    st.divider()
-    st.info("💡 **Pro tip for your placement interview:** Say you deployed a WhatsApp bot using Twilio + Flask + RAG pipeline that lets college students query institutional documents in natural language over WhatsApp — zero learning curve for end users!")
