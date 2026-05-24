@@ -40,10 +40,6 @@ Users can upload PDFs and documents, ask questions in natural language, analyze 
 - Like/dislike response system
 - Feedback logging for future improvement
 
-### 📱 WhatsApp Integration
-- WhatsApp bot support
-- Access chatbot outside the web interface
-
 ### 🐳 Deployment Ready
 - Docker support
 - Streamlit deployment support
@@ -113,8 +109,6 @@ Enterprise-RAG-Chatbot/
 │   └── retriever.py
 │
 ├── evaluation/
-│
-├── whatsapp_bot/
 │
 ├── feedback/
 │
@@ -217,9 +211,6 @@ docker run -p 8501:8501 enterprise-rag
 
 ### 📅 Study Planner
 - Personalized preparation planning
-
-### 📱 WhatsApp Bot
-- Access chatbot through WhatsApp
 
 ---
 
