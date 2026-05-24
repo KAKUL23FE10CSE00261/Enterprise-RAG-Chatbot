@@ -1,16 +1,15 @@
 """
-retrieval/retriever.py
-Hybrid retrieval: dense vector (SentenceTransformer) + BM25 + RRF + Cohere reranker.
-HyDE rewriting uses Groq (free).
+retrieval/retriever.py — Hybrid retrieval with absolute ChromaDB path fix
 """
-
 import os
+from pathlib import Path
 import chromadb
 from chromadb.utils import embedding_functions
 from rank_bm25 import BM25Okapi
 from groq import Groq
 
-CHROMA_PATH     = "chroma_db"
+# Absolute path — works from any working directory or inside Docker
+CHROMA_PATH     = str(Path(__file__).parent.parent / "chroma_db")
 COLLECTION_NAME = "enterprise_docs"
 TOP_K           = 12
 RERANK_TOP_N    = 5
@@ -29,8 +28,7 @@ def get_collection():
     )
 
 
-def hyde_rewrite(query):
-    """Generate a hypothetical answer using Groq to improve retrieval."""
+def hyde_rewrite(query: str) -> str:
     try:
         resp = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -42,17 +40,17 @@ def hyde_rewrite(query):
         )
         return resp.choices[0].message.content.strip()
     except Exception:
-        return query  # fallback to original query
+        return query
 
 
-def _collection_count(col):
+def _collection_count(col) -> int:
     try:
         return max(col.count(), 1)
     except Exception:
         return TOP_K
 
 
-def vector_search(query, top_k=TOP_K, doc_type_filter=None):
+def vector_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
     collection = get_collection()
     count = _collection_count(collection)
     if count == 0:
@@ -70,7 +68,7 @@ def vector_search(query, top_k=TOP_K, doc_type_filter=None):
     ]
 
 
-def bm25_search(query, top_k=TOP_K, doc_type_filter=None):
+def bm25_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
     collection = get_collection()
     where  = {"doc_type": doc_type_filter} if doc_type_filter else None
     kwargs = dict(include=["documents", "metadatas"])
@@ -93,7 +91,7 @@ def bm25_search(query, top_k=TOP_K, doc_type_filter=None):
     ]
 
 
-def reciprocal_rank_fusion(vector_results, bm25_results, k=60):
+def reciprocal_rank_fusion(vector_results: list, bm25_results: list, k=60) -> list[dict]:
     scores, chunks = {}, {}
     for rank, chunk in enumerate(vector_results):
         key = chunk["text"][:120]
@@ -106,7 +104,7 @@ def reciprocal_rank_fusion(vector_results, bm25_results, k=60):
     return [chunks[k] for k in sorted(scores, key=scores.__getitem__, reverse=True)]
 
 
-def rerank(query, chunks, top_n=RERANK_TOP_N):
+def rerank(query: str, chunks: list, top_n=RERANK_TOP_N) -> list[dict]:
     key = os.environ.get("COHERE_API_KEY")
     if not key or not chunks:
         return chunks[:top_n]
@@ -121,7 +119,8 @@ def rerank(query, chunks, top_n=RERANK_TOP_N):
         return chunks[:top_n]
 
 
-def retrieve(query, use_hyde=True, use_hybrid=True, doc_type_filter=None):
+def retrieve(query: str, use_hyde=True, use_hybrid=True,
+             doc_type_filter=None) -> tuple[list[dict], str]:
     search_query = hyde_rewrite(query) if use_hyde else query
 
     if use_hybrid:

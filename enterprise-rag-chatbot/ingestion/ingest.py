@@ -1,3 +1,6 @@
+"""
+ingestion/ingest.py — updated with delete_file() and absolute CHROMA_PATH
+"""
 import os
 from pathlib import Path
 from datetime import datetime
@@ -7,10 +10,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import fitz
 from docx import Document
 
-CHROMA_PATH     = "chroma_db"
+# Absolute path — works from any working directory or inside Docker
+CHROMA_PATH     = str(Path(__file__).parent.parent / "chroma_db")
 COLLECTION_NAME = "enterprise_docs"
 CHUNK_SIZE      = 512
 CHUNK_OVERLAP   = 50
+
 
 def load_pdf(path):
     doc = fitz.open(path)
@@ -50,7 +55,6 @@ def get_collection():
         metadata={"hnsw:space": "cosine"})
 
 def ingest_file(file_path, doc_type="general", original_filename=None):
-    # FIX: use original_filename so sources show real name, not tmp path
     real_name = original_filename or Path(file_path).name
     print(f"Ingesting: {real_name} [{doc_type}]")
     text   = load_document(file_path)
@@ -66,7 +70,19 @@ def ingest_file(file_path, doc_type="general", original_filename=None):
     print(f"  Stored {len(chunks)} chunks as '{real_name}'")
     return len(chunks)
 
-def get_full_text(filename):
+
+def delete_file(filename: str) -> int:
+    """Remove all chunks for a filename from ChromaDB. Returns number of chunks deleted."""
+    col  = get_collection()
+    data = col.get(where={"filename": filename}, include=["metadatas"])
+    if not data["ids"]:
+        return 0
+    col.delete(ids=data["ids"])
+    print(f"  Deleted {len(data['ids'])} chunks for '{filename}'")
+    return len(data["ids"])
+
+
+def get_full_text(filename: str) -> str:
     """Return full concatenated text for a specific ingested file."""
     try:
         col  = get_collection()
@@ -80,7 +96,7 @@ def get_full_text(filename):
     except Exception:
         return ""
 
-def list_ingested_files():
+def list_ingested_files() -> list[str]:
     try:
         col  = get_collection()
         data = col.get(include=["metadatas"])
