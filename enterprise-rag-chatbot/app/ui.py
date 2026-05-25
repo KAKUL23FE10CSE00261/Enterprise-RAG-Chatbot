@@ -2,7 +2,7 @@
 app/ui.py  —  StudyMind AI
 Claude-style chatbot: sidebar history, streaming, clean minimal UI
 """
-import os, sys, tempfile, json, hashlib, time
+import os, sys, tempfile, json, time
 from pathlib import Path
 from datetime import datetime, date
 import streamlit as st
@@ -611,13 +611,38 @@ DATA_DIR   = Path(__file__).parent.parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
 HIST_DIR   = DATA_DIR / "chat_history"
 
-def _hash(pw): return hashlib.sha256(pw.encode()).hexdigest()
+try:
+    import bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _BCRYPT_AVAILABLE = False
+
+def _hash_password(pw: str) -> str:
+    """Hash password with bcrypt + auto-generated salt."""
+    if _BCRYPT_AVAILABLE:
+        return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+    # Fallback if bcrypt not installed (should not happen in production)
+    import hashlib, secrets
+    salt = secrets.token_hex(16)
+    return salt + ":" + hashlib.sha256((salt + pw).encode()).hexdigest()
+
+def _check_password(pw: str, stored: str) -> bool:
+    """Verify a password against a stored bcrypt hash (or legacy SHA-256 hash)."""
+    if _BCRYPT_AVAILABLE and stored.startswith("$2"):
+        # Modern bcrypt hash
+        return bcrypt.checkpw(pw.encode(), stored.encode())
+    # Legacy SHA-256 (no salt) — support read-only for existing accounts
+    import hashlib
+    if ":" in stored:
+        salt, digest = stored.split(":", 1)
+        return hashlib.sha256((salt + pw).encode()).hexdigest() == digest
+    return hashlib.sha256(pw.encode()).hexdigest() == stored
 
 def _load_users():
     DATA_DIR.mkdir(exist_ok=True)
     if USERS_FILE.exists():
         return json.loads(USERS_FILE.read_text())
-    default = {"admin": {"password": _hash("admin123"), "name": "Admin",
+    default = {"admin": {"password": _hash_password("admin123"), "name": "Admin",
                          "created": datetime.utcnow().isoformat()}}
     USERS_FILE.write_text(json.dumps(default, indent=2))
     return default
@@ -627,14 +652,14 @@ def _save_users(u): USERS_FILE.write_text(json.dumps(u, indent=2))
 def auth_login(username, password):
     u = _load_users()
     if username not in u: return False, "User not found"
-    if u[username]["password"] != _hash(password): return False, "Wrong password"
+    if not _check_password(password, u[username]["password"]): return False, "Wrong password"
     return True, u[username]["name"]
 
 def auth_register(username, password, name):
     u = _load_users()
     if username in u: return False, "Username taken"
     if len(password) < 6: return False, "Password min 6 chars"
-    u[username] = {"password": _hash(password), "name": name,
+    u[username] = {"password": _hash_password(password), "name": name,
                    "created": datetime.utcnow().isoformat()}
     _save_users(u); return True, "Account created!"
 
@@ -860,62 +885,20 @@ with st.sidebar:
     st.markdown("<hr style='margin:14px 0;'>", unsafe_allow_html=True)
     st.markdown("<div class='sb-section-label'>Documents</div>", unsafe_allow_html=True)
     with st.expander("Upload & manage", expanded=False):
-
-        # ── Upload mode tabs (Files / Screenshot) ──
-        st.markdown("""
-        <style>
-        .upload-tab-row {
-          display: flex; gap: 6px; margin-bottom: 10px;
-        }
-        .upload-tab-btn {
-          flex: 1; background: var(--surface2,#222228);
-          border: 1px solid var(--border,#2e2e38);
-          border-radius: 9px; padding: 7px 6px;
-          font-size: 0.76rem; color: var(--muted,#7a7a90);
-          text-align: center; cursor: pointer; transition: all 0.14s;
-          font-family: 'Sora', sans-serif;
-        }
-        .upload-tab-btn.active {
-          background: var(--accent-bg,rgba(124,106,247,.12));
-          border-color: var(--accent,#7c6af7);
-          color: var(--accent2,#9f94fa);
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        upload_mode = st.radio(
-            "Upload mode",
-            ["📎 Add files or photos", "📸 Take a screenshot"],
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-
-        if upload_mode == "📎 Add files or photos":
-            uf = st.file_uploader(
-                "Drop PDFs, Word docs, or text files",
-                type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
-                accept_multiple_files=True,
-                label_visibility="collapsed",
-                help="Supports PDF, DOCX, TXT, and images (PNG/JPG)"
-            )
-        else:
-            st.info("📷 Use your device camera to capture a document or whiteboard photo.")
-            uf = st.camera_input("Take a photo of a document", label_visibility="collapsed")
-            uf = [uf] if uf else []
-
-        dtype = st.selectbox("Document type", ["syllabus","timetable","fees","rules","pyq","general"],
-                             label_visibility="visible")
+        uf = st.file_uploader("", type=["pdf","docx","txt"],
+                              accept_multiple_files=True, label_visibility="collapsed")
+        dtype = st.selectbox("", ["syllabus","timetable","fees","rules","pyq","general"],
+                             label_visibility="collapsed")
         if uf and st.button("⚡ Ingest files", type="primary", use_container_width=True):
             prog = st.progress(0)
-            files_list = uf if isinstance(uf, list) else [uf]
-            for i, f in enumerate(files_list):
-                prog.progress((i+1)/len(files_list), text=f"{f.name}")
-                sfx = Path(f.name).suffix if hasattr(f, 'name') else ".png"
+            for i, f in enumerate(uf):
+                prog.progress((i+1)/len(uf), text=f"{f.name}")
+                sfx = Path(f.name).suffix
                 with tempfile.NamedTemporaryFile(delete=False, suffix=sfx) as tmp:
                     tmp.write(f.read()); path = tmp.name
                 try:
-                    n = ingest_file(path, doc_type=dtype, original_filename=getattr(f, 'name', 'screenshot.png'))
-                    st.success(f"✅ {getattr(f,'name','screenshot')[:24]} — {n} chunks")
+                    n = ingest_file(path, doc_type=dtype, original_filename=f.name)
+                    st.success(f"✅ {f.name[:24]} — {n} chunks")
                 except Exception as e: st.error(f"❌ {e}")
                 finally: os.unlink(path)
             prog.empty(); st.rerun()
@@ -1000,7 +983,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab_chat, tab_plan, tab_pyq = st.tabs(["💬 Chat", "📅 Study Planner", "📊 PYQ Analyzer"])
+tab_chat, tab_plan, tab_pyq, tab_eval = st.tabs(["💬 Chat", "📅 Study Planner", "📊 PYQ Analyzer", "🧪 RAGAS Eval"])
 
 
 # ═══════════════════════════════════════════════════════
@@ -1092,15 +1075,7 @@ with tab_chat:
             </div>
             """, unsafe_allow_html=True)
 
-            if msg.get("used_general_knowledge"):
-                st.markdown("""
-                <div style='max-width:860px;margin:0 auto;padding:0 28px 0 74px;'>
-                  <div style='background:rgba(62,207,142,0.08);border:1px solid rgba(62,207,142,0.22);
-                       border-radius:8px;padding:8px 12px;font-size:0.78rem;color:#3ecf8e;'>
-                    💡 Answered from general knowledge — not from uploaded documents.
-                  </div>
-                </div>""", unsafe_allow_html=True)
-            elif msg.get("warning"):
+            if msg.get("warning"):
                 st.markdown(f"""
                 <div style='max-width:860px;margin:0 auto;padding:0 28px 0 74px;'>
                   <div style='background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.25);
@@ -1137,163 +1112,7 @@ with tab_chat:
                     log_feedback(msg.get("query",""), msg["content"], msg.get("sources",[]),"down")
                     st.session_state.messages[idx]["rated"] = True; st.rerun()
 
-    # ── Chat input row  (+  button  |  text input) ──────────────
-    # The + button is placed in a narrow left column; chat_input fills the rest.
-    # When clicked, an upload panel slides in ABOVE the input bar.
-
-    if "show_chat_upload" not in st.session_state:
-        st.session_state.show_chat_upload = False
-
-    # ── Upload panel (shown above input when + is active) ────────
-    if st.session_state.show_chat_upload:
-        st.markdown("""
-        <div style='max-width:860px;margin:0 auto 0 auto;padding:0 0 10px 0;'>
-        </div>""", unsafe_allow_html=True)
-
-        with st.container(border=True):
-            st.markdown(
-                "<div style='font-size:0.82rem;font-weight:600;color:#e8e8f0;"
-                "margin-bottom:8px;'>📎 Add files to chat</div>",
-                unsafe_allow_html=True)
-
-            up_mode = st.radio("Source", ["📂 Files / photos", "📸 Take screenshot"],
-                               horizontal=True, key="chat_up_mode",
-                               label_visibility="collapsed")
-
-            if up_mode == "📂 Files / photos":
-                chat_uf = st.file_uploader(
-                    "Choose files",
-                    type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
-                    accept_multiple_files=True,
-                    key="chat_file_up",
-                    label_visibility="collapsed")
-            else:
-                cam = st.camera_input("Snap a document", key="chat_cam",
-                                      label_visibility="collapsed")
-                chat_uf = [cam] if cam else []
-
-            dtype2 = st.selectbox(
-                "Document type",
-                ["syllabus", "timetable", "fees", "rules", "pyq", "general"],
-                key="chat_dtype", label_visibility="collapsed")
-
-            col_ing, col_cls = st.columns([3, 1])
-            if col_ing.button("⚡ Ingest", type="primary",
-                              key="chat_ingest_btn", use_container_width=True):
-                files_list = (chat_uf if isinstance(chat_uf, list)
-                              else ([chat_uf] if chat_uf else []))
-                files_list = [f for f in files_list if f is not None]
-                if files_list:
-                    prog2 = st.progress(0)
-                    for i, f in enumerate(files_list):
-                        prog2.progress((i + 1) / len(files_list),
-                                       text=getattr(f, "name", "file"))
-                        sfx2 = Path(getattr(f, "name", "file.pdf")).suffix or ".pdf"
-                        with tempfile.NamedTemporaryFile(delete=False,
-                                                         suffix=sfx2) as tmp2:
-                            tmp2.write(f.read())
-                            path2 = tmp2.name
-                        try:
-                            n2 = ingest_file(
-                                path2, doc_type=dtype2,
-                                original_filename=getattr(f, "name", "upload"))
-                            st.success(
-                                f"✅ {getattr(f, 'name', 'file')[:28]} — {n2} chunks")
-                        except Exception as e2:
-                            st.error(f"❌ {e2}")
-                        finally:
-                            os.unlink(path2)
-                    prog2.empty()
-                    st.session_state.show_chat_upload = False
-                    st.rerun()
-                else:
-                    st.warning("Select at least one file first.")
-
-            if col_cls.button("✕", key="chat_close_btn", use_container_width=True):
-                st.session_state.show_chat_upload = False
-                st.rerun()
-
-    # ── Bottom bar: [+]  [chat input] ────────────────────────────
-    st.markdown("""
-    <style>
-    /* ── + button: floats inside the chat bar on the left ── */
-
-    /* The Streamlit stBottom bar that holds st.chat_input */
-    [data-testid="stBottom"] > div {
-        position: relative !important;
-    }
-
-    /* Our injected + button container */
-    #chat-plus-portal {
-        position: fixed;
-        bottom: 22px;
-        /* sidebar=280px + main left padding ~28px + inner bar padding ~12px */
-        left: 328px;
-        z-index: 10002;
-        width: 36px;
-        height: 36px;
-    }
-    #chat-plus-portal button {
-        width: 36px !important;
-        height: 36px !important;
-        border-radius: 50% !important;
-        padding: 0 !important;
-        font-size: 1.25rem !important;
-        line-height: 36px !important;
-        text-align: center !important;
-        background: rgba(124,106,247,0.16) !important;
-        border: 1.5px solid rgba(124,106,247,0.50) !important;
-        color: #9f94fa !important;
-        cursor: pointer !important;
-        transition: all 0.15s ease !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.30) !important;
-        font-family: 'Sora', sans-serif !important;
-    }
-    #chat-plus-portal button:hover {
-        background: rgba(124,106,247,0.30) !important;
-        border-color: #7c6af7 !important;
-        transform: scale(1.1) !important;
-    }
-    /* Shift the chat textarea right to avoid overlap with + button */
-    [data-testid="stChatInput"] {
-        padding-left: 56px !important;
-    }
-    /* Hide the actual Streamlit + button widget from flow (we use a portal) */
-    div[data-testid="stBottom"] [data-testid="stButton"] {
-        position: fixed !important;
-        bottom: 22px !important;
-        left: 328px !important;
-        z-index: 10002 !important;
-        width: 36px !important;
-        height: 36px !important;
-        overflow: hidden !important;
-    }
-    div[data-testid="stBottom"] [data-testid="stButton"] button {
-        width: 36px !important;
-        height: 36px !important;
-        border-radius: 50% !important;
-        padding: 0 !important;
-        font-size: 1.25rem !important;
-        background: rgba(124,106,247,0.16) !important;
-        border: 1.5px solid rgba(124,106,247,0.50) !important;
-        color: #9f94fa !important;
-        transition: all 0.15s ease !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.30) !important;
-    }
-    div[data-testid="stBottom"] [data-testid="stButton"] button:hover {
-        background: rgba(124,106,247,0.30) !important;
-        border-color: #7c6af7 !important;
-        transform: scale(1.1) !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    if st.button("+", key="chat_plus_btn",
-                 help="Upload a file",
-                 type="secondary"):
-        st.session_state.show_chat_upload = not st.session_state.show_chat_upload
-        st.rerun()
-
+    # ── Chat input ────────────────────────────────────
     query = st.chat_input("Ask about your documents…")
     if st.session_state.pending:
         query = st.session_state.pending
@@ -1345,13 +1164,9 @@ with tab_chat:
 
         ph.empty()
 
-        srcs              = meta.get("sources", [])
-        grounded          = meta.get("grounded", True)
-        used_general_know = meta.get("used_general_knowledge", False)
-        if used_general_know:
-            warn = None   # no warning — intentional general answer
-        else:
-            warn = None if grounded else "This answer may not be fully backed by the uploaded documents."
+        srcs     = meta.get("sources", [])
+        grounded = meta.get("grounded", True)
+        warn     = None if grounded else "This answer may not be fully backed by the uploaded documents."
 
         followups = []
         try: followups = suggest_followups(query, full, srcs)
@@ -1360,7 +1175,6 @@ with tab_chat:
         st.session_state.messages.append({
             "role": "assistant", "content": full,
             "sources": srcs, "grounded": grounded, "warning": warn,
-            "used_general_knowledge": used_general_know,
             "query": query, "rated": False, "followups": followups, "time": now,
             "debug": {"rewritten_query": meta.get("rewritten_query"),
                       "chunks_used": meta.get("chunks_used")},
@@ -1576,3 +1390,105 @@ with tab_pyq:
             st.markdown(comp)
             st.download_button("📥 Download", comp,
                 f"pyq_{pyq_subject}.md", "text/markdown")
+
+# ═══════════════════════════════════════════════════════
+# TAB 4 — RAGAS EVAL DASHBOARD
+# ═══════════════════════════════════════════════════════
+with tab_eval:
+    st.markdown("""
+    <div style='padding:24px 0 8px;'>
+      <div style='font-weight:600;font-size:1rem;color:#e8e8f0;'>RAGAS Evaluation Dashboard</div>
+      <div style='font-size:0.80rem;color:#7a7a90;margin-top:4px;'>
+        Measures retrieval quality: faithfulness, answer relevancy, context precision &amp; recall.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    import json as _json, os as _os
+    from pathlib import Path as _Path
+
+    _results_path = _Path(__file__).parent.parent / "evaluation" / "ragas_results.json"
+
+    # ── Show cached results if they exist ──────────────────────────────────
+    if _results_path.exists():
+        try:
+            _df_data = _json.loads(_results_path.read_text())
+            import pandas as _pd
+            _df = _pd.DataFrame(_df_data)
+
+            _metrics = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+            _available = [m for m in _metrics if m in _df.columns]
+
+            if _available:
+                st.markdown("<div style='font-size:0.78rem;color:#3ecf8e;margin-bottom:16px;'>"
+                            "✓ Results loaded from last evaluation run</div>",
+                            unsafe_allow_html=True)
+
+                # Score cards
+                _cols = st.columns(len(_available))
+                _colors = {"faithfulness": "#7c6af7", "answer_relevancy": "#3ecf8e",
+                           "context_precision": "#f59e0b", "context_recall": "#9f94fa"}
+                for _col, _m in zip(_cols, _available):
+                    _val = _df[_m].mean()
+                    _color = _colors.get(_m, "#7c6af7")
+                    _col.markdown(f"""
+                    <div style='background:#1a1a1f;border:1px solid #2e2e38;border-radius:12px;
+                                padding:16px;text-align:center;'>
+                      <div style='font-size:1.8rem;font-weight:700;color:{_color};'>{_val:.3f}</div>
+                      <div style='font-size:0.72rem;color:#7a7a90;margin-top:4px;'>
+                        {_m.replace("_"," ").title()}</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Bar chart
+                _summary = _pd.DataFrame({
+                    "Metric": [m.replace("_", " ").title() for m in _available],
+                    "Score":  [round(_df[m].mean(), 3) for m in _available]
+                })
+                st.bar_chart(_summary.set_index("Metric"), color="#7c6af7")
+
+                # Per-question breakdown
+                with st.expander("Per-question breakdown"):
+                    _show_cols = ["question"] + _available if "question" in _df.columns else _available
+                    st.dataframe(_df[_show_cols].round(3), use_container_width=True)
+
+                st.download_button("📥 Download results (JSON)", _results_path.read_text(),
+                                   "ragas_results.json", "application/json")
+        except Exception as _e:
+            st.warning(f"Could not parse ragas_results.json: {_e}")
+
+    else:
+        st.info("No evaluation results yet. Run the evaluation below to generate scores.")
+
+    st.divider()
+
+    # ── Run evaluation button ───────────────────────────────────────────────
+    st.markdown("<div style='font-size:0.85rem;color:#e8e8f0;font-weight:600;"
+                "margin-bottom:8px;'>Run Evaluation</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:0.78rem;color:#7a7a90;margin-bottom:12px;'>"
+                "Requires <code>OPENAI_API_KEY</code> set in your environment or <code>.env</code> file. "
+                "Evaluation calls OpenAI GPT-4o for scoring — uses ~$0.05–0.20 per run.</div>",
+                unsafe_allow_html=True)
+
+    _col_a, _col_b = st.columns(2)
+    _run_hybrid = _col_a.toggle("Hybrid retrieval (BM25 + dense)", value=True)
+    _run_hyde   = _col_b.toggle("HyDE query rewriting", value=True)
+
+    if st.button("▶  Run RAGAS Evaluation", type="primary", use_container_width=False):
+        if not _os.environ.get("OPENAI_API_KEY"):
+            st.error("OPENAI_API_KEY not set. Add it to your .env file and restart the app.")
+        else:
+            with st.spinner("Running evaluation — this takes ~1–2 minutes…"):
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, str(_Path(__file__).parent.parent))
+                    from evaluation.evaluate import run_evaluation as _run_eval
+                    _scores = _run_eval(use_hybrid=_run_hybrid, use_hyde=_run_hyde)
+                    if _scores:
+                        st.success("Evaluation complete! Refresh the page to see updated scores.")
+                        st.json(_scores)
+                    else:
+                        st.error("Evaluation returned no results. Check terminal for errors.")
+                except Exception as _eval_err:
+                    st.error(f"Evaluation failed: {_eval_err}")
