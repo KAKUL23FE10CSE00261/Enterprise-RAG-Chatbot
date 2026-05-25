@@ -5,29 +5,22 @@ Groq-powered RAG pipeline with:
   - Hallucination guard (llama-3.1-8b-instant)
   - Document summarizer
   - Follow-up question suggestions
-  - General-knowledge fallback when docs have no relevant answer
 """
 
 import os
-from groq import Groq
+from groq import Groq, APIError, RateLimitError, APITimeoutError, APIConnectionError
 from retrieval.retriever import retrieve
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
-SYSTEM_PROMPT = """You are StudyMind AI, a helpful assistant for students.
+SYSTEM_PROMPT = """You are a helpful, precise enterprise assistant.
 
 Rules:
-1. FIRST, try to answer using the provided context from uploaded documents.
-2. If the context contains relevant information, use it and cite Sources.
-3. If the context is NOT relevant to the question, answer from your own knowledge as a helpful AI assistant — do NOT say you don't have enough information.
-4. When answering from your own knowledge (no relevant docs), do NOT include a "Sources:" line.
-5. When answering from documents, always end with: Sources: [filename(s)]
-6. Be concise and structured. Use bullet points for lists."""
-
-GENERAL_SYSTEM_PROMPT = """You are StudyMind AI, a helpful and knowledgeable assistant for students.
-Answer the question clearly and helpfully using your general knowledge.
-Be concise and structured. Use bullet points for lists where appropriate.
-Do NOT mention documents or sources — just answer the question directly."""
+1. Answer using ONLY the provided context — never from prior knowledge.
+2. If the answer is not found in context, say:
+   "I don't have enough information in the uploaded documents."
+3. Always end your response with: Sources: [filename(s)]
+4. Be concise and structured. Use bullet points for lists."""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -48,27 +41,21 @@ def extract_sources(chunks):
     return out
 
 def is_grounded(answer, chunks):
-    resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content":
-            f"Context:\n{build_context(chunks)}\n\nAnswer:\n{answer}\n\n"
-            "Is every factual claim in the Answer supported by the Context? Reply YES or NO only."}],
-        max_tokens=5)
-    return resp.choices[0].message.content.strip().upper().startswith("YES")
-
-def is_context_relevant(query, chunks):
-    """Quick check: does the retrieved context actually relate to the query?"""
-    if not chunks:
-        return False
-    context_preview = build_context(chunks)[:2000]
-    resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content":
-            f"Question: {query}\n\nContext:\n{context_preview}\n\n"
-            "Does this context contain information relevant to answering the question above? "
-            "Reply YES or NO only."}],
-        max_tokens=5)
-    return resp.choices[0].message.content.strip().upper().startswith("YES")
+    """Check if the answer is grounded in the provided context."""
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content":
+                f"Context:\n{build_context(chunks)}\n\nAnswer:\n{answer}\n\n"
+                "Is every factual claim in the Answer supported by the Context? Reply YES or NO only."}],
+            max_tokens=5,
+            timeout=10)
+        return resp.choices[0].message.content.strip().upper().startswith("YES")
+    except (APIError, RateLimitError, APITimeoutError, APIConnectionError):
+        # Grounding check is best-effort; don't crash the main answer
+        return True
+    except Exception:
+        return True
 
 
 # ── Streaming answer ──────────────────────────────────────────────────────────
@@ -76,41 +63,73 @@ def is_context_relevant(query, chunks):
 def stream_answer(query, history=None, use_hyde=True,
                   use_hybrid=True, doc_type_filter=None):
     """Yields text tokens then a final metadata dict."""
-    chunks, rq = retrieve(query, use_hyde=use_hyde,
-                          use_hybrid=use_hybrid, doc_type_filter=doc_type_filter)
+    try:
+        chunks, rq = retrieve(query, use_hyde=use_hyde,
+                              use_hybrid=use_hybrid, doc_type_filter=doc_type_filter)
+    except Exception as e:
+        yield f"⚠️ Retrieval error: {str(e)}. Please check your ChromaDB setup."
+        yield {"sources": [], "grounded": False, "chunks_used": 0, "rewritten_query": query}
+        return
 
-    # Determine if we should use doc context or fall back to general knowledge
-    use_doc_context = chunks and is_context_relevant(query, chunks)
+    if not chunks:
+        yield "No relevant documents found. Please upload and ingest documents first."
+        yield {"sources": [], "grounded": False, "chunks_used": 0, "rewritten_query": rq}
+        return
 
-    if use_doc_context:
-        # ── RAG mode: answer from documents ──
-        msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if history: msgs.extend(history[-6:])
-        msgs.append({"role": "user", "content": f"Context:\n{build_context(chunks)}\n\nQuestion: {query}"})
-    else:
-        # ── General knowledge mode ──
-        msgs = [{"role": "system", "content": GENERAL_SYSTEM_PROMPT}]
-        if history: msgs.extend(history[-6:])
-        msgs.append({"role": "user", "content": query})
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history: msgs.extend(history[-6:])
+    msgs.append({"role": "user", "content": f"Context:\n{build_context(chunks)}\n\nQuestion: {query}"})
 
     full = ""
-    for chunk in client.chat.completions.create(
-            model="llama-3.3-70b-versatile", messages=msgs,
-            temperature=0.3, max_tokens=700, stream=True):
-        delta = chunk.choices[0].delta.content or ""
-        full += delta
-        yield delta
+    try:
+        for chunk in client.chat.completions.create(
+                model="llama-3.3-70b-versatile", messages=msgs,
+                temperature=0.2, max_tokens=700, stream=True, timeout=30):
+            delta = chunk.choices[0].delta.content or ""
+            full += delta
+            yield delta
+    except RateLimitError:
+        yield "\n\n⚠️ Rate limit reached on Groq API. Please wait a moment and try again."
+        yield {"sources": [], "grounded": False, "chunks_used": len(chunks), "rewritten_query": rq}
+        return
+    except APITimeoutError:
+        yield "\n\n⚠️ Request timed out. The Groq API took too long to respond. Please retry."
+        yield {"sources": [], "grounded": False, "chunks_used": len(chunks), "rewritten_query": rq}
+        return
+    except APIConnectionError:
+        yield "\n\n⚠️ Could not connect to Groq API. Check your internet connection and API key."
+        yield {"sources": [], "grounded": False, "chunks_used": len(chunks), "rewritten_query": rq}
+        return
+    except APIError as e:
+        yield f"\n\n⚠️ Groq API error: {str(e)}. Please check your GROQ_API_KEY."
+        yield {"sources": [], "grounded": False, "chunks_used": len(chunks), "rewritten_query": rq}
+        return
+    except Exception as e:
+        yield f"\n\n⚠️ Unexpected error: {str(e)}"
+        yield {"sources": [], "grounded": False, "chunks_used": len(chunks), "rewritten_query": rq}
+        return
 
-    if use_doc_context:
-        srcs     = extract_sources(chunks)
-        grounded = is_grounded(full, chunks)
-    else:
-        srcs     = []   # no document sources — general knowledge answer
-        grounded = True # general answers aren't subject to hallucination guard
-
+    srcs     = extract_sources(chunks)
+    grounded = is_grounded(full, chunks)
     yield {"answer": full, "sources": srcs, "grounded": grounded,
-           "chunks_used": len(chunks) if use_doc_context else 0,
-           "rewritten_query": rq, "used_general_knowledge": not use_doc_context}
+           "chunks_used": len(chunks), "rewritten_query": rq}
+
+
+# ── Non-streaming answer (used by evaluate.py) ────────────────────────────────
+
+def generate_answer(query, history=None, use_hyde=True,
+                    use_hybrid=True, doc_type_filter=None, check_grounding=True):
+    """Non-streaming wrapper around stream_answer. Returns a dict with 'answer' key."""
+    full_text = ""
+    metadata  = {}
+    for token in stream_answer(query, history=history, use_hyde=use_hyde,
+                                use_hybrid=use_hybrid, doc_type_filter=doc_type_filter):
+        if isinstance(token, dict):
+            metadata = token
+        else:
+            full_text += token
+    metadata["answer"] = full_text
+    return metadata
 
 
 # ── Document summarizer ───────────────────────────────────────────────────────
@@ -118,34 +137,46 @@ def stream_answer(query, history=None, use_hyde=True,
 def summarize_document(filename, full_text):
     """Summarize an entire ingested document."""
     text = full_text[:6000] + ("..." if len(full_text) > 6000 else "")
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content":
-             "You are an expert document analyst. Provide a clear, structured summary."},
-            {"role": "user", "content":
-             f"Summarize this document '{filename}' in the following format:\n\n"
-             "## 📋 Overview\n(2-3 sentence summary)\n\n"
-             "## 🔑 Key Points\n(5-7 bullet points)\n\n"
-             "## 💡 Main Conclusions\n(2-3 sentences)\n\n"
-             f"Document:\n{text}"}],
-        temperature=0.3, max_tokens=800)
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content":
+                 "You are an expert document analyst. Provide a clear, structured summary."},
+                {"role": "user", "content":
+                 f"Summarize this document '{filename}' in the following format:\n\n"
+                 "## 📋 Overview\n(2-3 sentence summary)\n\n"
+                 "## 🔑 Key Points\n(5-7 bullet points)\n\n"
+                 "## 💡 Main Conclusions\n(2-3 sentences)\n\n"
+                 f"Document:\n{text}"}],
+            temperature=0.3, max_tokens=800, timeout=30)
+        return resp.choices[0].message.content.strip()
+    except RateLimitError:
+        return "⚠️ Rate limit reached. Please wait a moment and try summarising again."
+    except (APITimeoutError, APIConnectionError):
+        return "⚠️ Connection error. Please check your API key and internet connection."
+    except APIError as e:
+        return f"⚠️ API error while summarising: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Unexpected error: {str(e)}"
 
 
 # ── Follow-up question suggestions ───────────────────────────────────────────
 
 def suggest_followups(query, answer, sources):
     """Generate 3 relevant follow-up questions based on the Q&A."""
-    resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content":
-             "Generate exactly 3 short follow-up questions a user might ask next. "
-             "Return ONLY the 3 questions, one per line, no numbering, no extra text."},
-            {"role": "user", "content":
-             f"User asked: {query}\n\nAssistant answered: {answer[:500]}\n\n"
-             "What are 3 natural follow-up questions?"}],
-        temperature=0.7, max_tokens=150)
-    lines = resp.choices[0].message.content.strip().split("\n")
-    return [q.strip("- •123.").strip() for q in lines if q.strip()][:3]
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content":
+                 "Generate exactly 3 short follow-up questions a user might ask next. "
+                 "Return ONLY the 3 questions, one per line, no numbering, no extra text."},
+                {"role": "user", "content":
+                 f"User asked: {query}\n\nAssistant answered: {answer[:500]}\n\n"
+                 "What are 3 natural follow-up questions?"}],
+            temperature=0.7, max_tokens=150, timeout=15)
+        lines = resp.choices[0].message.content.strip().split("\n")
+        return [q.strip("- •123.").strip() for q in lines if q.strip()][:3]
+    except (APIError, RateLimitError, APITimeoutError, APIConnectionError, Exception):
+        return []
