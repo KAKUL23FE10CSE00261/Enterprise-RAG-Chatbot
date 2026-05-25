@@ -860,20 +860,62 @@ with st.sidebar:
     st.markdown("<hr style='margin:14px 0;'>", unsafe_allow_html=True)
     st.markdown("<div class='sb-section-label'>Documents</div>", unsafe_allow_html=True)
     with st.expander("Upload & manage", expanded=False):
-        uf = st.file_uploader("", type=["pdf","docx","txt"],
-                              accept_multiple_files=True, label_visibility="collapsed")
-        dtype = st.selectbox("", ["syllabus","timetable","fees","rules","pyq","general"],
-                             label_visibility="collapsed")
+
+        # ── Upload mode tabs (Files / Screenshot) ──
+        st.markdown("""
+        <style>
+        .upload-tab-row {
+          display: flex; gap: 6px; margin-bottom: 10px;
+        }
+        .upload-tab-btn {
+          flex: 1; background: var(--surface2,#222228);
+          border: 1px solid var(--border,#2e2e38);
+          border-radius: 9px; padding: 7px 6px;
+          font-size: 0.76rem; color: var(--muted,#7a7a90);
+          text-align: center; cursor: pointer; transition: all 0.14s;
+          font-family: 'Sora', sans-serif;
+        }
+        .upload-tab-btn.active {
+          background: var(--accent-bg,rgba(124,106,247,.12));
+          border-color: var(--accent,#7c6af7);
+          color: var(--accent2,#9f94fa);
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        upload_mode = st.radio(
+            "Upload mode",
+            ["📎 Add files or photos", "📸 Take a screenshot"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        if upload_mode == "📎 Add files or photos":
+            uf = st.file_uploader(
+                "Drop PDFs, Word docs, or text files",
+                type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+                help="Supports PDF, DOCX, TXT, and images (PNG/JPG)"
+            )
+        else:
+            st.info("📷 Use your device camera to capture a document or whiteboard photo.")
+            uf = st.camera_input("Take a photo of a document", label_visibility="collapsed")
+            uf = [uf] if uf else []
+
+        dtype = st.selectbox("Document type", ["syllabus","timetable","fees","rules","pyq","general"],
+                             label_visibility="visible")
         if uf and st.button("⚡ Ingest files", type="primary", use_container_width=True):
             prog = st.progress(0)
-            for i, f in enumerate(uf):
-                prog.progress((i+1)/len(uf), text=f"{f.name}")
-                sfx = Path(f.name).suffix
+            files_list = uf if isinstance(uf, list) else [uf]
+            for i, f in enumerate(files_list):
+                prog.progress((i+1)/len(files_list), text=f"{f.name}")
+                sfx = Path(f.name).suffix if hasattr(f, 'name') else ".png"
                 with tempfile.NamedTemporaryFile(delete=False, suffix=sfx) as tmp:
                     tmp.write(f.read()); path = tmp.name
                 try:
-                    n = ingest_file(path, doc_type=dtype, original_filename=f.name)
-                    st.success(f"✅ {f.name[:24]} — {n} chunks")
+                    n = ingest_file(path, doc_type=dtype, original_filename=getattr(f, 'name', 'screenshot.png'))
+                    st.success(f"✅ {getattr(f,'name','screenshot')[:24]} — {n} chunks")
                 except Exception as e: st.error(f"❌ {e}")
                 finally: os.unlink(path)
             prog.empty(); st.rerun()
@@ -1050,7 +1092,15 @@ with tab_chat:
             </div>
             """, unsafe_allow_html=True)
 
-            if msg.get("warning"):
+            if msg.get("used_general_knowledge"):
+                st.markdown("""
+                <div style='max-width:860px;margin:0 auto;padding:0 28px 0 74px;'>
+                  <div style='background:rgba(62,207,142,0.08);border:1px solid rgba(62,207,142,0.22);
+                       border-radius:8px;padding:8px 12px;font-size:0.78rem;color:#3ecf8e;'>
+                    💡 Answered from general knowledge — not from uploaded documents.
+                  </div>
+                </div>""", unsafe_allow_html=True)
+            elif msg.get("warning"):
                 st.markdown(f"""
                 <div style='max-width:860px;margin:0 auto;padding:0 28px 0 74px;'>
                   <div style='background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.25);
@@ -1139,9 +1189,13 @@ with tab_chat:
 
         ph.empty()
 
-        srcs     = meta.get("sources", [])
-        grounded = meta.get("grounded", True)
-        warn     = None if grounded else "This answer may not be fully backed by the uploaded documents."
+        srcs              = meta.get("sources", [])
+        grounded          = meta.get("grounded", True)
+        used_general_know = meta.get("used_general_knowledge", False)
+        if used_general_know:
+            warn = None   # no warning — intentional general answer
+        else:
+            warn = None if grounded else "This answer may not be fully backed by the uploaded documents."
 
         followups = []
         try: followups = suggest_followups(query, full, srcs)
@@ -1150,6 +1204,7 @@ with tab_chat:
         st.session_state.messages.append({
             "role": "assistant", "content": full,
             "sources": srcs, "grounded": grounded, "warning": warn,
+            "used_general_knowledge": used_general_know,
             "query": query, "rated": False, "followups": followups, "time": now,
             "debug": {"rewritten_query": meta.get("rewritten_query"),
                       "chunks_used": meta.get("chunks_used")},
