@@ -13,7 +13,7 @@ from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from app.rag_pipeline import generate_answer
+from app.rag_pipeline import generate_answer   # ← now correctly calls generate_answer()
 from retrieval.retriever import retrieve
 
 # ── Test cases (extend with your own docs) ────────────────────────────────────
@@ -50,23 +50,40 @@ TEST_CASES = [
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run_evaluation(use_hybrid: bool = True, use_hyde: bool = True) -> None:
+def run_evaluation(use_hybrid: bool = True, use_hyde: bool = True) -> dict:
+    """
+    Run RAGAS evaluation and return results as a dict.
+    Also saves results to evaluation/ragas_results.json.
+    """
     print(f"\n{'='*55}")
     print(f"  RAGAS Evaluation  |  hybrid={use_hybrid}  hyde={use_hyde}")
     print(f"{'='*55}")
+
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key:
+        print("  ✗  OPENAI_API_KEY not set — RAGAS requires OpenAI for scoring.")
+        print("     Set it with: export OPENAI_API_KEY=sk-...")
+        return {}
 
     questions, answers, contexts, ground_truths = [], [], [], []
 
     for tc in TEST_CASES:
         q = tc["question"]
         print(f"  ▸ {q}")
-        chunks, _ = retrieve(q, use_hyde=use_hyde, use_hybrid=use_hybrid)
-        result    = generate_answer(q, use_hyde=use_hyde, use_hybrid=use_hybrid,
-                                    check_grounding=False)
-        questions.append(q)
-        answers.append(result["answer"])
-        contexts.append([c["text"] for c in chunks])
-        ground_truths.append(tc["ground_truth"])
+        try:
+            chunks, _ = retrieve(q, use_hyde=use_hyde, use_hybrid=use_hybrid)
+            result    = generate_answer(q, use_hyde=use_hyde, use_hybrid=use_hybrid,
+                                        check_grounding=False)
+            questions.append(q)
+            answers.append(result.get("answer", ""))
+            contexts.append([c["text"] for c in chunks])
+            ground_truths.append(tc["ground_truth"])
+        except Exception as e:
+            print(f"  ✗  Skipping '{q}': {e}")
+
+    if not questions:
+        print("  No questions evaluated successfully.")
+        return {}
 
     dataset = Dataset.from_dict({
         "question":    questions,
@@ -75,8 +92,8 @@ def run_evaluation(use_hybrid: bool = True, use_hyde: bool = True) -> None:
         "ground_truth": ground_truths,
     })
 
-    llm = ChatOpenAI(model="gpt-4o",               api_key=os.environ["OPENAI_API_KEY"])
-    emb = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.environ["OPENAI_API_KEY"])
+    llm = ChatOpenAI(model="gpt-4o",               api_key=openai_key)
+    emb = OpenAIEmbeddings(model="text-embedding-3-small", api_key=openai_key)
 
     results = evaluate(
         dataset=dataset,
@@ -90,15 +107,20 @@ def run_evaluation(use_hybrid: bool = True, use_hyde: bool = True) -> None:
     print(f"\n{'─'*40}")
     print("  RAGAS Results")
     print(f"{'─'*40}")
+    scores = {}
     for metric in ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]:
         val = df[metric].mean()
         bar = "█" * int(val * 20)
         print(f"  {metric:<25} {val:.3f}  {bar}")
+        scores[metric] = round(float(val), 3)
     print(f"{'─'*40}")
 
-    out_path = "evaluation/ragas_results.json"
+    out_dir  = os.path.join(os.path.dirname(__file__))
+    out_path = os.path.join(out_dir, "ragas_results.json")
     df.to_json(out_path, orient="records", indent=2)
     print(f"\n  Saved → {out_path}\n")
+
+    return scores
 
 
 if __name__ == "__main__":
