@@ -1137,7 +1137,156 @@ with tab_chat:
                     log_feedback(msg.get("query",""), msg["content"], msg.get("sources",[]),"down")
                     st.session_state.messages[idx]["rated"] = True; st.rerun()
 
-    # ── Chat input ────────────────────────────────────
+    # ── Chat input + inline + button ─────────────────
+    # CSS: nudge Streamlit's chat input right to make room for the + button
+    st.markdown("""
+    <style>
+    /* Push the chat textarea to the right so our + btn fits */
+    [data-testid="stChatInput"] {
+        padding-left: 52px !important;
+        position: relative !important;
+    }
+    /* The + button sits inside the chat input bar on the left */
+    .chat-plus-btn {
+        position: fixed;
+        bottom: 18px;
+        left: calc(280px + 28px);   /* sidebar width + main padding */
+        z-index: 9999;
+        width: 36px; height: 36px;
+        border-radius: 50%;
+        background: var(--accent-bg, rgba(124,106,247,0.15));
+        border: 1.5px solid rgba(124,106,247,0.40);
+        color: #9f94fa;
+        font-size: 1.3rem;
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        transition: all 0.16s;
+        line-height: 1;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .chat-plus-btn:hover {
+        background: rgba(124,106,247,0.28);
+        border-color: #7c6af7;
+        transform: scale(1.08);
+    }
+    /* Hide the default file uploader widget — we show it via toggle */
+    div[data-testid="stFileUploader"].hidden-uploader {
+        position: fixed !important;
+        bottom: 70px !important;
+        left: calc(280px + 20px) !important;
+        width: 320px !important;
+        z-index: 9998 !important;
+        background: var(--surface, #1a1a1f) !important;
+        border: 1px solid var(--border, #2e2e38) !important;
+        border-radius: 16px !important;
+        padding: 12px !important;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Toggle state for the popup
+    if "show_chat_upload" not in st.session_state:
+        st.session_state.show_chat_upload = False
+
+    # + button (uses a small Streamlit button styled via CSS)
+    btn_col, _ = st.columns([1, 20])
+    with btn_col:
+        if st.button("＋", key="chat_plus_btn",
+                     help="Upload a file to ingest",
+                     type="secondary"):
+            st.session_state.show_chat_upload = not st.session_state.show_chat_upload
+
+    # Inline upload popup
+    if st.session_state.show_chat_upload:
+        with st.container():
+            st.markdown("""
+            <div style='background:var(--surface,#1a1a1f);border:1px solid var(--border,#2e2e38);
+                 border-radius:14px;padding:14px 16px;margin-bottom:10px;
+                 box-shadow:0 8px 32px rgba(0,0,0,0.45);max-width:480px;'>
+              <div style='font-size:0.80rem;font-weight:600;color:#e8e8f0;margin-bottom:10px;
+                   display:flex;align-items:center;gap:8px;'>
+                📎 <span>Add files to chat</span>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            up_mode = st.radio("Source", ["📂 Files or photos", "📸 Take screenshot"],
+                               horizontal=True, key="chat_up_mode",
+                               label_visibility="collapsed")
+
+            if up_mode == "📂 Files or photos":
+                chat_uf = st.file_uploader("", type=["pdf","docx","txt","png","jpg","jpeg"],
+                                           accept_multiple_files=True,
+                                           key="chat_file_up",
+                                           label_visibility="collapsed")
+            else:
+                cam = st.camera_input("Snap document", key="chat_cam",
+                                      label_visibility="collapsed")
+                chat_uf = [cam] if cam else []
+
+            dtype2 = st.selectbox("Type", ["syllabus","timetable","fees","rules","pyq","general"],
+                                  key="chat_dtype", label_visibility="collapsed")
+
+            c_ing, c_cls = st.columns([2, 1])
+            if c_ing.button("⚡ Ingest", type="primary", key="chat_ingest_btn",
+                            use_container_width=True):
+                files_list = chat_uf if isinstance(chat_uf, list) else ([chat_uf] if chat_uf else [])
+                if files_list:
+                    prog2 = st.progress(0)
+                    for i, f in enumerate(files_list):
+                        prog2.progress((i+1)/len(files_list), text=getattr(f,'name','file'))
+                        sfx2 = Path(getattr(f,'name','file.pdf')).suffix or ".pdf"
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=sfx2) as tmp2:
+                            tmp2.write(f.read()); path2 = tmp2.name
+                        try:
+                            n2 = ingest_file(path2, doc_type=dtype2,
+                                             original_filename=getattr(f,'name','upload'))
+                            st.success(f"✅ {getattr(f,'name','file')[:24]} — {n2} chunks")
+                        except Exception as e2: st.error(f"❌ {e2}")
+                        finally: os.unlink(path2)
+                    prog2.empty()
+                    st.session_state.show_chat_upload = False
+                    st.rerun()
+                else:
+                    st.warning("Select a file first")
+            if c_cls.button("✕ Close", key="chat_close_btn", use_container_width=True):
+                st.session_state.show_chat_upload = False
+                st.rerun()
+
+    # Override + button styling to look like a circle floating on the input bar
+    st.markdown("""
+    <style>
+    /* Target only our chat_plus_btn */
+    [data-testid="stButton"] button[kind="secondary"][data-testid="baseButton-secondary"]:has(+ *) {
+        display: none;
+    }
+    div:has(> [data-testid="stButton"] > button[title="Upload a file to ingest"]) {
+        position: fixed !important;
+        bottom: 14px !important;
+        left: calc(280px + 20px) !important;
+        z-index: 10000 !important;
+        width: 40px !important;
+    }
+    div:has(> [data-testid="stButton"] > button[title="Upload a file to ingest"]) button {
+        width: 38px !important; height: 38px !important;
+        border-radius: 50% !important;
+        padding: 0 !important;
+        font-size: 1.2rem !important;
+        background: rgba(124,106,247,0.15) !important;
+        border: 1.5px solid rgba(124,106,247,0.45) !important;
+        color: #9f94fa !important;
+        display: flex !important; align-items: center !important;
+        justify-content: center !important;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.35) !important;
+    }
+    div:has(> [data-testid="stButton"] > button[title="Upload a file to ingest"]) button:hover {
+        background: rgba(124,106,247,0.28) !important;
+        border-color: #7c6af7 !important;
+        transform: scale(1.08) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     query = st.chat_input("Ask about your documents…")
     if st.session_state.pending:
         query = st.session_state.pending
