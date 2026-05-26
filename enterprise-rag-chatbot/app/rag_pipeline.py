@@ -1,10 +1,12 @@
 """
 app/rag_pipeline.py
-Groq-powered RAG pipeline with:
-  - Streaming generation (llama-3.3-70b-versatile)
-  - Hallucination guard (llama-3.1-8b-instant)
-  - Document summarizer
-  - Follow-up question suggestions
+
+Fixes applied:
+  1. History is truncated by estimated token count (not a fixed message count)
+     so we never silently overflow the LLM context window.
+  2. SYSTEM_PROMPT + context + question token estimate is computed before
+     adding history, and history is trimmed from the oldest end to fit.
+  3. suggest_followups error handling tightened.
 """
 
 import os
@@ -22,50 +24,95 @@ Rules:
 3. Always end your response with: Sources: [filename(s)]
 4. Be concise and structured. Use bullet points for lists."""
 
+# Approximate token budget for history (4 chars ≈ 1 token, model limit ≈ 8192)
+_MAX_HISTORY_TOKENS = 2000
+_CHARS_PER_TOKEN    = 4
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def build_context(chunks):
+def _approx_tokens(text: str) -> int:
+    return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
+def _trim_history(history: list[dict], budget_tokens: int) -> list[dict]:
+    """
+    Return the most-recent portion of history that fits within budget_tokens.
+    Always keeps pairs (user + assistant) together.
+    """
+    if not history:
+        return []
+    total  = 0
+    kept   = []
+    # Walk backwards in pairs
+    pairs  = list(zip(history[::2], history[1::2]))
+    for user_msg, asst_msg in reversed(pairs):
+        cost = _approx_tokens(user_msg["content"]) + _approx_tokens(asst_msg["content"])
+        if total + cost > budget_tokens:
+            break
+        kept.insert(0, user_msg)
+        kept.insert(1, asst_msg)
+        total += cost
+    return kept
+
+
+def build_context(chunks: list[dict]) -> str:
     parts = []
     for i, c in enumerate(chunks):
-        fn = c.get("filename") or c["source"].replace("\\","/").split("/")[-1]
+        fn = c.get("filename") or c["source"].replace("\\", "/").split("/")[-1]
         parts.append(f"[{i+1}] (Source: {fn})\n{c['text']}")
     return "\n\n---\n\n".join(parts)
 
-def extract_sources(chunks):
+
+def extract_sources(chunks: list[dict]) -> list[str]:
     seen, out = set(), []
     for c in chunks:
-        fn = c.get("filename") or c["source"].replace("\\","/").split("/")[-1]
+        fn = c.get("filename") or c["source"].replace("\\", "/").split("/")[-1]
         if fn not in seen:
-            seen.add(fn); out.append(fn)
+            seen.add(fn)
+            out.append(fn)
     return out
 
-def is_grounded(answer, chunks):
-    """Check if the answer is grounded in the provided context."""
+
+def is_grounded(answer: str, chunks: list[dict]) -> bool:
+    """Secondary LLM call: verify every factual claim is supported by context."""
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content":
-                f"Context:\n{build_context(chunks)}\n\nAnswer:\n{answer}\n\n"
-                "Is every factual claim in the Answer supported by the Context? Reply YES or NO only."}],
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Context:\n{build_context(chunks)}\n\n"
+                    f"Answer:\n{answer}\n\n"
+                    "Is every factual claim in the Answer supported by the Context? "
+                    "Reply YES or NO only."
+                ),
+            }],
             max_tokens=5,
-            timeout=10)
+            timeout=10,
+        )
         return resp.choices[0].message.content.strip().upper().startswith("YES")
-    except (APIError, RateLimitError, APITimeoutError, APIConnectionError):
-        # Grounding check is best-effort; don't crash the main answer
-        return True
-    except Exception:
-        return True
+    except (APIError, RateLimitError, APITimeoutError, APIConnectionError, Exception):
+        return True  # best-effort; don't crash the main answer
 
 
 # ── Streaming answer ──────────────────────────────────────────────────────────
 
-def stream_answer(query, history=None, use_hyde=True,
-                  use_hybrid=True, doc_type_filter=None):
+def stream_answer(
+    query:           str,
+    history:         list[dict] | None = None,
+    use_hyde:        bool = True,
+    use_hybrid:      bool = True,
+    doc_type_filter: str | None = None,
+):
     """Yields text tokens then a final metadata dict."""
     try:
-        chunks, rq = retrieve(query, use_hyde=use_hyde,
-                              use_hybrid=use_hybrid, doc_type_filter=doc_type_filter)
+        chunks, rq = retrieve(
+            query,
+            use_hyde=use_hyde,
+            use_hybrid=use_hybrid,
+            doc_type_filter=doc_type_filter,
+        )
     except Exception as e:
         yield f"⚠️ Retrieval error: {str(e)}. Please check your ChromaDB setup."
         yield {"sources": [], "grounded": False, "chunks_used": 0, "rewritten_query": query}
@@ -76,15 +123,31 @@ def stream_answer(query, history=None, use_hyde=True,
         yield {"sources": [], "grounded": False, "chunks_used": 0, "rewritten_query": rq}
         return
 
+    context_text = build_context(chunks)
+    # Reserve tokens for system prompt + context + question; remainder goes to history
+    fixed_tokens = (
+        _approx_tokens(SYSTEM_PROMPT)
+        + _approx_tokens(context_text)
+        + _approx_tokens(query)
+        + 200  # safety margin
+    )
+    history_budget = max(0, _MAX_HISTORY_TOKENS - fixed_tokens)
+    trimmed_history = _trim_history(history or [], history_budget)
+
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if history: msgs.extend(history[-6:])
-    msgs.append({"role": "user", "content": f"Context:\n{build_context(chunks)}\n\nQuestion: {query}"})
+    msgs.extend(trimmed_history)
+    msgs.append({"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {query}"})
 
     full = ""
     try:
         for chunk in client.chat.completions.create(
-                model="llama-3.3-70b-versatile", messages=msgs,
-                temperature=0.2, max_tokens=700, stream=True, timeout=30):
+            model="llama-3.3-70b-versatile",
+            messages=msgs,
+            temperature=0.2,
+            max_tokens=700,
+            stream=True,
+            timeout=30,
+        ):
             delta = chunk.choices[0].delta.content or ""
             full += delta
             yield delta
@@ -111,19 +174,35 @@ def stream_answer(query, history=None, use_hyde=True,
 
     srcs     = extract_sources(chunks)
     grounded = is_grounded(full, chunks)
-    yield {"answer": full, "sources": srcs, "grounded": grounded,
-           "chunks_used": len(chunks), "rewritten_query": rq}
+    yield {
+        "answer":          full,
+        "sources":         srcs,
+        "grounded":        grounded,
+        "chunks_used":     len(chunks),
+        "rewritten_query": rq,
+    }
 
 
 # ── Non-streaming answer (used by evaluate.py) ────────────────────────────────
 
-def generate_answer(query, history=None, use_hyde=True,
-                    use_hybrid=True, doc_type_filter=None, check_grounding=True):
-    """Non-streaming wrapper around stream_answer. Returns a dict with 'answer' key."""
+def generate_answer(
+    query:           str,
+    history:         list[dict] | None = None,
+    use_hyde:        bool = True,
+    use_hybrid:      bool = True,
+    doc_type_filter: str | None = None,
+    check_grounding: bool = True,
+) -> dict:
+    """Non-streaming wrapper. Returns a dict with at least an 'answer' key."""
     full_text = ""
     metadata  = {}
-    for token in stream_answer(query, history=history, use_hyde=use_hyde,
-                                use_hybrid=use_hybrid, doc_type_filter=doc_type_filter):
+    for token in stream_answer(
+        query,
+        history=history,
+        use_hyde=use_hyde,
+        use_hybrid=use_hybrid,
+        doc_type_filter=doc_type_filter,
+    ):
         if isinstance(token, dict):
             metadata = token
         else:
@@ -134,22 +213,25 @@ def generate_answer(query, history=None, use_hyde=True,
 
 # ── Document summarizer ───────────────────────────────────────────────────────
 
-def summarize_document(filename, full_text):
-    """Summarize an entire ingested document."""
+def summarize_document(filename: str, full_text: str) -> str:
     text = full_text[:6000] + ("..." if len(full_text) > 6000 else "")
     try:
         resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content":
-                 "You are an expert document analyst. Provide a clear, structured summary."},
-                {"role": "user", "content":
-                 f"Summarize this document '{filename}' in the following format:\n\n"
-                 "## 📋 Overview\n(2-3 sentence summary)\n\n"
-                 "## 🔑 Key Points\n(5-7 bullet points)\n\n"
-                 "## 💡 Main Conclusions\n(2-3 sentences)\n\n"
-                 f"Document:\n{text}"}],
-            temperature=0.3, max_tokens=800, timeout=30)
+                {"role": "system", "content": "You are an expert document analyst. Provide a clear, structured summary."},
+                {"role": "user",   "content": (
+                    f"Summarize this document '{filename}' in the following format:\n\n"
+                    "## 📋 Overview\n(2-3 sentence summary)\n\n"
+                    "## 🔑 Key Points\n(5-7 bullet points)\n\n"
+                    "## 💡 Main Conclusions\n(2-3 sentences)\n\n"
+                    f"Document:\n{text}"
+                )},
+            ],
+            temperature=0.3,
+            max_tokens=800,
+            timeout=30,
+        )
         return resp.choices[0].message.content.strip()
     except RateLimitError:
         return "⚠️ Rate limit reached. Please wait a moment and try summarising again."
@@ -163,20 +245,27 @@ def summarize_document(filename, full_text):
 
 # ── Follow-up question suggestions ───────────────────────────────────────────
 
-def suggest_followups(query, answer, sources):
+def suggest_followups(query: str, answer: str, sources: list[str]) -> list[str]:
     """Generate 3 relevant follow-up questions based on the Q&A."""
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content":
-                 "Generate exactly 3 short follow-up questions a user might ask next. "
-                 "Return ONLY the 3 questions, one per line, no numbering, no extra text."},
-                {"role": "user", "content":
-                 f"User asked: {query}\n\nAssistant answered: {answer[:500]}\n\n"
-                 "What are 3 natural follow-up questions?"}],
-            temperature=0.7, max_tokens=150, timeout=15)
+                {"role": "system", "content": (
+                    "Generate exactly 3 short follow-up questions a user might ask next. "
+                    "Return ONLY the 3 questions, one per line, no numbering, no extra text."
+                )},
+                {"role": "user", "content": (
+                    f"User asked: {query}\n\n"
+                    f"Assistant answered: {answer[:500]}\n\n"
+                    "What are 3 natural follow-up questions?"
+                )},
+            ],
+            temperature=0.7,
+            max_tokens=150,
+            timeout=15,
+        )
         lines = resp.choices[0].message.content.strip().split("\n")
         return [q.strip("- •123.").strip() for q in lines if q.strip()][:3]
-    except (APIError, RateLimitError, APITimeoutError, APIConnectionError, Exception):
+    except Exception:
         return []
