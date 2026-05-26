@@ -2,7 +2,7 @@
 app/ui.py  —  StudyMind AI
 Claude-style chatbot: sidebar history, streaming, clean minimal UI
 """
-import os, sys, tempfile, json, time
+import os, sys, tempfile, json, time, html as _html
 from pathlib import Path
 from datetime import datetime, date
 import streamlit as st
@@ -1154,11 +1154,12 @@ with tab_chat:
                 meta = token
             else:
                 full += token
+                safe = _html.escape(full)
                 ph.markdown(f"""
                 <div class='msg-row'>
                   <div class='msg-avatar ai-av'>✦</div>
                   <div>
-                    <div class='msg-bubble ai-bubble'>{full}<span style='opacity:0.4;animation:pulse 0.8s infinite;'>▌</span></div>
+                    <div class='msg-bubble ai-bubble'>{safe}<span style='opacity:0.4;animation:pulse 0.8s infinite;'>▌</span></div>
                   </div>
                 </div>""", unsafe_allow_html=True)
 
@@ -1310,8 +1311,11 @@ with tab_pyq:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(pf.read()); path = tmp.name
                 try:
-                    st.session_state.pyq_analyses.append(
-                        analyze_pyq(path, pyq_subject, original_filename=pf.name))
+                    result = analyze_pyq(path, pyq_subject, original_filename=pf.name)
+                    if isinstance(result, dict) and "error" in result:
+                        st.error(f"{pf.name}: {result['error']}")
+                    else:
+                        st.session_state.pyq_analyses.append(result)
                 except Exception as e: st.error(f"{pf.name}: {e}")
                 finally: os.unlink(path)
             prog.empty()
