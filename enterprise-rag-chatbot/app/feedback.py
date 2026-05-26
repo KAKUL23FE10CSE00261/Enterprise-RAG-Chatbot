@@ -5,9 +5,12 @@ Logs thumbs-up / thumbs-down feedback to a JSONL file for future fine-tuning.
 
 import json
 import os
+from pathlib import Path
 from datetime import datetime
 
-FEEDBACK_PATH = "feedback/feedback.jsonl"
+# Absolute path — works from any working directory or inside Docker
+FEEDBACK_DIR  = Path(__file__).parent.parent / "feedback"
+FEEDBACK_PATH = FEEDBACK_DIR / "feedback.jsonl"
 
 
 def log_feedback(
@@ -17,7 +20,7 @@ def log_feedback(
     rating: str,          # "up" or "down"
     comment: str = "",
 ) -> None:
-    os.makedirs("feedback", exist_ok=True)
+    os.makedirs(FEEDBACK_DIR, exist_ok=True)
     record = {
         "timestamp": datetime.utcnow().isoformat(),
         "query":     query,
@@ -31,7 +34,7 @@ def log_feedback(
 
 
 def load_feedback() -> list[dict]:
-    if not os.path.exists(FEEDBACK_PATH):
+    if not FEEDBACK_PATH.exists():
         return []
     records = []
     with open(FEEDBACK_PATH, encoding="utf-8") as f:
