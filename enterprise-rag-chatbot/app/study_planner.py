@@ -5,7 +5,7 @@ Generates a day-by-day study plan using Groq + syllabus from ChromaDB.
 
 import os
 from datetime import datetime, timedelta
-from groq import Groq
+from groq import Groq, APIError, RateLimitError, APITimeoutError, APIConnectionError
 from retrieval.retriever import retrieve
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
@@ -78,17 +78,26 @@ Create a structured study plan with this EXACT format:
 
 Be specific and realistic. If days are few, focus on high-priority topics only."""
 
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are an expert academic advisor creating personalized study plans."},
-            {"role": "user",   "content": prompt},
-        ],
-        temperature=0.3,
-        max_tokens=1500,
-    )
-
-    plan_text = resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are an expert academic advisor creating personalized study plans."},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+            timeout=45,
+        )
+        plan_text = resp.choices[0].message.content.strip()
+    except RateLimitError:
+        return {"error": "⚠️ Groq rate limit reached. Please wait a moment and try again."}
+    except APITimeoutError:
+        return {"error": "⚠️ Request timed out. Please try again."}
+    except (APIConnectionError, APIError) as e:
+        return {"error": f"⚠️ API error: {str(e)}"}
+    except Exception as e:
+        return {"error": f"⚠️ Unexpected error: {str(e)}"}
 
     return {
         "subject":       subject,
@@ -110,16 +119,26 @@ def generate_multi_subject_plan(subjects_info):
         for s in subjects_info
     )
 
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are an expert academic advisor."},
-            {"role": "user",   "content":
-             f"Create a combined weekly study schedule for these subjects:\n{subjects_text}\n\n"
-             "Show a table: Day | Morning | Afternoon | Evening | Total Hours\n"
-             "Balance subjects based on exam dates and priority."},
-        ],
-        temperature=0.3,
-        max_tokens=1000,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are an expert academic advisor."},
+                {"role": "user",   "content":
+                 f"Create a combined weekly study schedule for these subjects:\n{subjects_text}\n\n"
+                 "Show a table: Day | Morning | Afternoon | Evening | Total Hours\n"
+                 "Balance subjects based on exam dates and priority."},
+            ],
+            temperature=0.3,
+            max_tokens=1000,
+            timeout=45,
+        )
+        return resp.choices[0].message.content.strip()
+    except RateLimitError:
+        return "⚠️ Groq rate limit reached. Please wait a moment and try again."
+    except APITimeoutError:
+        return "⚠️ Request timed out. Please try again."
+    except (APIConnectionError, APIError) as e:
+        return f"⚠️ API error: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Unexpected error: {str(e)}"
