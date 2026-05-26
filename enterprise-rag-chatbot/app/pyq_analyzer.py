@@ -9,7 +9,7 @@ Analyzes Previous Year Questions (PYQ) PDFs to find:
 import os
 import re
 from collections import Counter
-from groq import Groq
+from groq import Groq, APIError, RateLimitError, APITimeoutError, APIConnectionError
 import fitz  # PyMuPDF
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
@@ -40,34 +40,45 @@ def analyze_pyq(file_path, subject_name, original_filename=None):
     text_sample = text[:8000] + ("..." if len(text) > 8000 else "")
 
     # ── Step 1: Extract and categorize questions ──────────────────────────────
-    extract_resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content":
-             "You are an expert at analyzing exam papers. "
-             "Extract and categorize questions by topic."},
-            {"role": "user", "content":
-             f"Analyze this {subject_name} PYQ paper: '{fname}'\n\n"
-             f"Text:\n{text_sample}\n\n"
-             "Return a JSON-like analysis in this EXACT format:\n\n"
-             "TOPICS:\n"
-             "- TopicName: X questions\n"
-             "- TopicName: X questions\n"
-             "(list all topics found)\n\n"
-             "FREQUENTLY_ASKED:\n"
-             "(top 5 most repeated questions/concepts)\n\n"
-             "PREDICTIONS:\n"
-             "(top 5 topics likely to appear in next exam based on frequency)\n\n"
-             "DIFFICULTY:\n"
-             "(overall difficulty: Easy/Medium/Hard + explanation)\n\n"
-             "STUDY_ADVICE:\n"
-             "(3 specific tips based on this PYQ analysis)"}
-        ],
-        temperature=0.2,
-        max_tokens=1200,
-    )
-
-    analysis_text = extract_resp.choices[0].message.content.strip()
+    try:
+        extract_resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content":
+                 "You are an expert at analyzing exam papers. "
+                 "Extract and categorize questions by topic."},
+                {"role": "user", "content":
+                 f"Analyze this {subject_name} PYQ paper: '{fname}'\n\n"
+                 f"Text:\n{text_sample}\n\n"
+                 "Return a JSON-like analysis in this EXACT format:\n\n"
+                 "TOPICS:\n"
+                 "- TopicName: X questions\n"
+                 "- TopicName: X questions\n"
+                 "(list all topics found)\n\n"
+                 "FREQUENTLY_ASKED:\n"
+                 "(top 5 most repeated questions/concepts)\n\n"
+                 "PREDICTIONS:\n"
+                 "(top 5 topics likely to appear in next exam based on frequency)\n\n"
+                 "DIFFICULTY:\n"
+                 "(overall difficulty: Easy/Medium/Hard + explanation)\n\n"
+                 "STUDY_ADVICE:\n"
+                 "(3 specific tips based on this PYQ analysis)"}
+            ],
+            temperature=0.2,
+            max_tokens=1200,
+            timeout=45,
+        )
+        analysis_text = extract_resp.choices[0].message.content.strip()
+    except RateLimitError:
+        return {"error": "⚠️ Groq rate limit reached. Please wait a moment and try again."}
+    except APITimeoutError:
+        return {"error": "⚠️ Request timed out. Please try again."}
+    except APIConnectionError:
+        return {"error": "⚠️ Could not connect to Groq API. Check your GROQ_API_KEY."}
+    except APIError as e:
+        return {"error": f"⚠️ Groq API error: {str(e)}"}
+    except Exception as e:
+        return {"error": f"⚠️ Unexpected error during analysis: {str(e)}"}
 
     # ── Step 2: Parse topic frequencies for chart ─────────────────────────────
     chart_data = {}
@@ -77,17 +88,15 @@ def analyze_pyq(file_path, subject_name, original_filename=None):
             topic_section = True
             continue
         if topic_section and line.startswith("- "):
-            # Parse "- TopicName: X questions"
             match = re.match(r"-\s+(.+?):\s+(\d+)\s+question", line)
             if match:
                 topic = match.group(1).strip()
                 count = int(match.group(2))
                 chart_data[topic] = count
         if topic_section and line.strip() == "":
-            if chart_data:  # stop after first empty line after topics
+            if chart_data:
                 topic_section = False
 
-    # Fallback: if parsing failed, create dummy data from text
     if not chart_data:
         chart_data = {"Analysis Complete": 1}
 
@@ -106,11 +115,11 @@ def analyze_pyq(file_path, subject_name, original_filename=None):
             break
 
     return {
-        "filename":    fname,
-        "subject":     subject_name,
-        "analysis":    analysis_text,
-        "chart_data":  chart_data,
-        "predictions": predictions[:5],
+        "filename":      fname,
+        "subject":       subject_name,
+        "analysis":      analysis_text,
+        "chart_data":    chart_data,
+        "predictions":   predictions[:5],
         "total_text_len": len(text),
     }
 
@@ -128,20 +137,30 @@ def compare_pyqs(analyses):
         for a in analyses
     )
 
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are an expert exam analyst."},
-            {"role": "user",   "content":
-             f"Compare these {len(analyses)} PYQ analyses and identify:\n\n"
-             f"{summaries}\n\n"
-             "1. Topics that appear EVERY year (must prepare)\n"
-             "2. Topics that appeared recently (likely this year)\n"
-             "3. Topics that haven't appeared yet (might come)\n"
-             "4. Overall trend in question difficulty\n"
-             "5. Final prediction: Top 5 topics for next exam"}
-        ],
-        temperature=0.3,
-        max_tokens=800,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are an expert exam analyst."},
+                {"role": "user",   "content":
+                 f"Compare these {len(analyses)} PYQ analyses and identify:\n\n"
+                 f"{summaries}\n\n"
+                 "1. Topics that appear EVERY year (must prepare)\n"
+                 "2. Topics that appeared recently (likely this year)\n"
+                 "3. Topics that haven't appeared yet (might come)\n"
+                 "4. Overall trend in question difficulty\n"
+                 "5. Final prediction: Top 5 topics for next exam"}
+            ],
+            temperature=0.3,
+            max_tokens=800,
+            timeout=45,
+        )
+        return resp.choices[0].message.content.strip()
+    except RateLimitError:
+        return "⚠️ Rate limit reached during comparison. Please wait a moment and try again."
+    except APITimeoutError:
+        return "⚠️ Comparison request timed out. Please try again."
+    except (APIConnectionError, APIError) as e:
+        return f"⚠️ API error during comparison: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Unexpected error during comparison: {str(e)}"
