@@ -1,6 +1,29 @@
-chroma_db/ 
-*.sqlite3 
-*.bin 
-chroma_db/ 
-*.sqlite3 
-*.bin 
+# Vector database
+chroma_db/
+*.sqlite3
+*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code temp files
+tempCodeRunnerFile*
+*.python
+
+# Environment variables — NEVER commit API keys
+.env
+*.env
+
+# Personal user data — NEVER commit to public repo
+data/users.json
+data/chat_history/
+feedback/feedback.jsonl
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Evaluation results (optional — commit only when you want to show scores)
+# evaluation/ragas_results.json
