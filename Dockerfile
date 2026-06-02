@@ -2,17 +2,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for PyMuPDF
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 && \
-    rm -rf /var/lib/apt/lists/*
+    libgl1 \
+    libglib2.0-0 \
+    build-essential \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# ChromaDB persistence volume
+# Persistent storage
 VOLUME ["/app/chroma_db", "/app/feedback"]
 
 EXPOSE 8501
