@@ -26,4 +26,3 @@ feedback/feedback.jsonl
 Thumbs.db
 
 # Evaluation results (optional — commit only when you want to show scores)
-# evaluation/ragas_results.json
