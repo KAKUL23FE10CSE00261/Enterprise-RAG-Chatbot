@@ -6,11 +6,13 @@ Fixes applied:
   2. BM25 index cached in memory — invalidated when collection count changes
   3. TOP_K / RERANK_TOP_N configurable via env vars
   4. All public constants exposed for testing
+  5. Fixed Python 3.9 compatibility (removed | union syntax)
 """
 
 import os
 import threading
 from pathlib import Path
+from typing import Optional, List, Dict, Tuple
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -25,12 +27,11 @@ RERANK_TOP_N    = int(os.environ.get("RAG_RERANK_TOP_N", 5))
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
 # ── ChromaDB singleton ────────────────────────────────────────────────────────
-# One persistent client per process avoids repeated filesystem opens.
-_chroma_client: chromadb.PersistentClient | None = None
+_chroma_client = None   # FIX: removed | None type hint (Python 3.9 compat)
 _chroma_lock   = threading.Lock()
 
 
-def _get_client() -> chromadb.PersistentClient:
+def _get_client():
     global _chroma_client
     if _chroma_client is None:
         with _chroma_lock:
@@ -51,11 +52,7 @@ def get_collection():
 
 
 def invalidate_collection_cache() -> None:
-    """
-    Call this after ingesting or deleting documents so the BM25 cache
-    is rebuilt on the next query.  Also resets the ChromaDB client so
-    it re-reads the updated sqlite3 file.
-    """
+    """Call after ingesting or deleting documents."""
     global _chroma_client
     with _chroma_lock:
         _chroma_client = None
@@ -63,22 +60,18 @@ def invalidate_collection_cache() -> None:
 
 
 # ── BM25 cache ────────────────────────────────────────────────────────────────
-# Key: (doc_type_filter or "all", collection_count)
-# Value: (BM25Okapi index, list[str] docs, list[dict] metadatas)
-# When the collection grows/shrinks the count changes → automatic invalidation.
-_bm25_cache: dict = {}
+_bm25_cache: Dict = {}
 _bm25_lock  = threading.Lock()
 
 
 def _get_bm25_index(collection, doc_type_filter=None):
-    count = _collection_count(collection)
+    count     = _collection_count(collection)
     cache_key = (doc_type_filter or "all", count)
 
     with _bm25_lock:
         if cache_key in _bm25_cache:
             return _bm25_cache[cache_key]
 
-        # Build index
         where  = {"doc_type": doc_type_filter} if doc_type_filter else None
         kwargs = dict(include=["documents", "metadatas"])
         if where:
@@ -125,7 +118,7 @@ def hyde_rewrite(query: str) -> str:
 
 # ── Search functions ──────────────────────────────────────────────────────────
 
-def vector_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
+def vector_search(query: str, top_k=TOP_K, doc_type_filter=None) -> List[Dict]:
     collection = get_collection()
     count      = _collection_count(collection)
     if count == 0:
@@ -146,13 +139,10 @@ def vector_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
     ]
 
 
-def bm25_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
-    """
-    BM25 search using cached index — O(1) corpus load after first call.
-    Index is rebuilt only when collection count changes.
-    """
-    collection = get_collection()
-    index, docs, metas = _get_bm25_index(collection, doc_type_filter)
+def bm25_search(query: str, top_k=TOP_K, doc_type_filter=None) -> List[Dict]:
+    """BM25 search using cached index."""
+    collection          = get_collection()
+    index, docs, metas  = _get_bm25_index(collection, doc_type_filter)
 
     if index is None or not docs:
         return []
@@ -171,22 +161,22 @@ def bm25_search(query: str, top_k=TOP_K, doc_type_filter=None) -> list[dict]:
 
 
 def reciprocal_rank_fusion(
-    vector_results: list, bm25_results: list, k: int = 60
-) -> list[dict]:
-    scores: dict[str, float] = {}
-    chunks: dict[str, dict]  = {}
+    vector_results: List, bm25_results: List, k: int = 60
+) -> List[Dict]:
+    scores: Dict = {}
+    chunks: Dict = {}
     for rank, chunk in enumerate(vector_results):
-        key            = chunk["text"][:120]
-        scores[key]    = scores.get(key, 0) + 1 / (k + rank + 1)
-        chunks[key]    = chunk
+        key         = chunk["text"][:120]
+        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
+        chunks[key] = chunk
     for rank, chunk in enumerate(bm25_results):
-        key            = chunk["text"][:120]
-        scores[key]    = scores.get(key, 0) + 1 / (k + rank + 1)
-        chunks[key]    = chunk
+        key         = chunk["text"][:120]
+        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
+        chunks[key] = chunk
     return [chunks[k] for k in sorted(scores, key=scores.__getitem__, reverse=True)]
 
 
-def rerank(query: str, chunks: list, top_n=RERANK_TOP_N) -> list[dict]:
+def rerank(query: str, chunks: List, top_n=RERANK_TOP_N) -> List[Dict]:
     key = os.environ.get("COHERE_API_KEY")
     if not key or not chunks:
         return chunks[:top_n]
@@ -209,12 +199,12 @@ def rerank(query: str, chunks: list, top_n=RERANK_TOP_N) -> list[dict]:
 
 def retrieve(
     query: str,
-    use_hyde: bool   = True,
-    use_hybrid: bool = True,
-    doc_type_filter  = None,
-    top_k: int       = TOP_K,
+    use_hyde: bool    = True,
+    use_hybrid: bool  = True,
+    doc_type_filter   = None,
+    top_k: int        = TOP_K,
     rerank_top_n: int = RERANK_TOP_N,
-) -> tuple[list[dict], str]:
+) -> Tuple[List[Dict], str]:
     search_query = hyde_rewrite(query) if use_hyde else query
 
     if use_hybrid:
