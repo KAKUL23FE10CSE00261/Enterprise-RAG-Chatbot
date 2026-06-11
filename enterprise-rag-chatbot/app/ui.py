@@ -1099,9 +1099,14 @@ with tab_chat:
                   <div class='fq-row'>{fq_html}</div>
                 </div>""", unsafe_allow_html=True)
 
-                for fq in msg["followups"]:
-                    if st.button(fq, key=f"fq_{idx}_{fq[:10]}", help="Click to ask this"):
-                        st.session_state.pending = fq; st.rerun()
+                for fq_idx, fq in enumerate(msg["followups"]):
+                    if st.button(
+                        fq,
+                        key=f"fq_{idx}_{fq_idx}",
+                        help="Click to ask this"
+                    ):
+                        st.session_state.pending = fq
+                        st.rerun()
 
             if not msg.get("rated"):
                 c1, c2, _ = st.columns([1,1,14])
