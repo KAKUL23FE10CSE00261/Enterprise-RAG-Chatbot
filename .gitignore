@@ -8,22 +8,38 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Virtual environments
+venv/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
 # VS Code temp files
 tempCodeRunnerFile*
 *.python
 
-# Environment variables — NEVER commit API keys
+# Environment variables
 .env
 *.env
 
-# Personal user data — NEVER commit to public repo
+# Personal user data
 data/users.json
 data/chat_history/
 feedback/feedback.jsonl
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Build files
+build/
+dist/
+*.egg-info/
 
 # OS junk
 .DS_Store
 Thumbs.db
 
-# Evaluation results (optional — commit only when you want to show scores)
+# Evaluation results (optional)
 # evaluation/ragas_results.json
