@@ -858,7 +858,7 @@ with st.sidebar:
         st.markdown("<div class='sb-section-label'>Recent</div>", unsafe_allow_html=True)
         for sess in sessions[:25]:
             active = sess["id"] == st.session_state.sid
-            label  = sess["title"][:32] + ("…" if len(sess["title"]) > 32 else "")
+            label  = str(sess["title"])[:32] + ("…" if len(str(sess["title"])) > 32 else "")
             c1, c2 = st.columns([9, 2])
             with c1:
                 btn_style = "primary" if active else "secondary"
@@ -906,7 +906,7 @@ with st.sidebar:
         ingested = list_ingested_files()
         for fn in ingested:
             c1, c2 = st.columns([5,1])
-            c1.markdown(f"<div class='file-pill'>📄 {fn[:22]}{'…' if len(fn)>22 else ''}</div>",
+            c1.markdown(f"<div class='file-pill'>📄 {str(fn)[:22]}{'…' if len(str(fn))>22 else ''}</div>",
                         unsafe_allow_html=True)
             if c2.button("✕", key=f"df_{fn}"):
                 try: delete_file(fn); st.rerun()
