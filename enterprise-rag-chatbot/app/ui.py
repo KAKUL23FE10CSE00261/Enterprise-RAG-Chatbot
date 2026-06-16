@@ -1496,8 +1496,18 @@ with tab_eval:
                 unsafe_allow_html=True)
 
     _col_a, _col_b = st.columns(2)
-    _run_hybrid = _col_a.toggle("Hybrid retrieval (BM25 + dense)", value=True)
-    _run_hyde   = _col_b.toggle("HyDE query rewriting", value=True)
+    
+    _run_hybrid = _col_a.toggle(
+        "Hybrid retrieval (BM25 + dense)",
+        value=True,
+        key="ragas_hybrid_toggle"
+    )
+    
+    _run_hyde = _col_b.toggle(
+        "HyDE query rewriting",
+        value=True,
+        key="ragas_hyde_toggle"
+    )
 
     if st.button("▶  Run RAGAS Evaluation", type="primary", use_container_width=False):
         if not _os.environ.get("OPENAI_API_KEY"):
