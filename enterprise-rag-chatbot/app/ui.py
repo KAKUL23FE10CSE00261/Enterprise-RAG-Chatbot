@@ -918,9 +918,24 @@ with st.sidebar:
     # ── Settings ──────────────────────────────────────
     st.markdown("<div class='sb-section-label'>Settings</div>", unsafe_allow_html=True)
     with st.expander("Search & display", expanded=False):
-        use_hybrid = st.toggle("Hybrid search (BM25 + dense)", value=True)
-        use_hyde   = st.toggle("HyDE query rewriting", value=True)
-        show_debug = st.toggle("Show debug info", value=False)
+        use_hybrid = st.toggle(
+            "Hybrid search (BM25 + dense)",
+            value=True,
+            key="sidebar_hybrid_toggle"
+        )
+        
+        use_hyde = st.toggle(
+            "HyDE query rewriting",
+            value=True,
+            key="sidebar_hyde_toggle"
+        )
+        
+        show_debug = st.toggle(
+            "Show debug info",
+            value=False,
+            key="sidebar_debug_toggle"
+        )
+        
         doc_filter = st.selectbox("Filter doc type",
             ["All","syllabus","timetable","fees","rules","pyq","general"])
         active_filter = None if doc_filter=="All" else doc_filter
