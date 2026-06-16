@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
+import streamlit as st
 import chromadb
 from chromadb.utils import embedding_functions
 from rank_bm25 import BM25Okapi
@@ -24,7 +25,9 @@ COLLECTION_NAME = "enterprise_docs"
 TOP_K           = int(os.environ.get("RAG_TOP_K", 12))
 RERANK_TOP_N    = int(os.environ.get("RAG_RERANK_TOP_N", 5))
 
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+groq_client = Groq(
+    api_key=st.secrets["GROQ_API_KEY"]
+)
 
 # ── ChromaDB singleton ────────────────────────────────────────────────────────
 _chroma_client = None   # FIX: removed | None type hint (Python 3.9 compat)
